@@ -38,6 +38,19 @@ def health():
     return {"status": "healthy"}
 
 
+@app.get("/ready")
+def ready(request: Request):
+    """Readiness: can this instance enrich incidents? True only when the
+    service catalog is loaded. Liveness (/health) only says the process is up."""
+    catalog = getattr(request.app.state, "catalog", None)
+    if not catalog:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "not ready", "reason": "service catalog not loaded"},
+        )
+    return {"status": "ready", "services": len(catalog)}
+
+
 @app.get("/services")
 def list_services(request: Request):
     """List the services the Bridge knows about."""

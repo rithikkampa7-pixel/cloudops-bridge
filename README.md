@@ -18,7 +18,7 @@ On-call engineers often get paged with very little context. They lose the first 
 
 CloudOps Bridge answers these from a **service catalog**: one YAML file per service that the Development and CloudOps teams agree on as their operational handoff. The knowledge lives in version control instead of in someone's head.
 
-## Current status: Phase 2 complete
+## Current status: Phase 3 complete
 
 | Component | Status |
 |---|---|
@@ -29,14 +29,15 @@ CloudOps Bridge answers these from a **service catalog**: one YAML file per serv
 | `/metrics` in Prometheus text format | ✅ Implemented (no Prometheus server yet) |
 | Automated tests (pytest) | ✅ Implemented |
 | **Docker images + Docker Compose** (non-root, health checks, read-only config mounts) | ✅ Implemented (Phase 2) |
-| Kubernetes (kind), HPA autoscaling | 🔜 Future work |
-| Prometheus, Alertmanager, Grafana | 🔜 Future work |
+| **Kubernetes on kind**: Deployments, ClusterIP Services, ConfigMaps, liveness/readiness probes, requests/limits, hardened securityContext, rolling update and rollback | ✅ Implemented (Phase 3) |
+| HPA autoscaling | 🔜 Future work |
+| Prometheus server, Alertmanager, Grafana | 🔜 Future work |
 | PostgreSQL, deployment tracking, incident timeline | 🔜 Future work |
 | Locust load testing (ticket on-sale spike) | 🔜 Future work |
 | Argo CD, GitHub Actions, Terraform, Ansible | 🔜 Future work |
-| Slack-style notifications, dashboard, incident reports | 🔜 Future work |
+| Slack integration, dashboard, incident reports | 🔜 Future work |
 
-## Architecture (Phases 1–2)
+## Architecture (Phases 1–3)
 
 ```
                     (you, with curl, acting as Alertmanager)
@@ -47,13 +48,14 @@ CloudOps Bridge answers these from a **service catalog**: one YAML file per serv
 +---------------------+     +-------------------+     service-catalog/*.yaml
 | Demo Ticket Service |     |  CloudOps Bridge  | <-- (owners, dependencies,
 |  :8080              |     |  :8081            |      alerts, severities,
-|  /health  /ready    |     +-------------------+      runbook mappings)
+|  /health  /ready    |     |  /health /ready   |      runbook mappings)
+|                     |     +-------------------+
 |  /tickets /metrics  |               |
 |  /tickets/purchase  |               v
 +---------------------+       Enriched incident (JSON)
 ```
 
-In Phase 2 each box runs in its own container (see [Run with Docker](#run-with-docker-phase-2)); the design is unchanged.
+Each box runs in its own container under Docker Compose ([Phase 2](#run-with-docker-phase-2)), or as a 2-replica Deployment behind a ClusterIP Service on Kubernetes ([Phase 3](#run-on-kubernetes-with-kind-phase-3)). On Kubernetes the catalog and runbooks come from ConfigMaps. The design is unchanged.
 
 The two services **do not call each other** yet. The Ticket API is the system being monitored. The Bridge is the incident-context tool. In a later phase, Prometheus will scrape the Ticket API's `/metrics` and Alertmanager will send alerts to the Bridge automatically.
 
@@ -76,6 +78,7 @@ cloudops-bridge/
 ├── tests/
 ├── ticket_service/Dockerfile, bridge/Dockerfile
 ├── compose.yaml             # starts both containers
+├── kubernetes/              # Phase 3 manifests, ConfigMap generator, demo tools
 ├── .dockerignore
 ├── requirements.txt         # runtime deps (installed in images)
 ├── requirements-dev.txt     # runtime + test deps (local development)
@@ -169,6 +172,72 @@ docker compose down
 
 Inventory is in memory, so it resets to 5000 whenever the ticket-service container is recreated.
 
+## Run on Kubernetes with kind (Phase 3)
+
+Full guide, including failure, rollout and rollback demonstrations and troubleshooting: **[kubernetes/README.md](kubernetes/README.md)**.
+
+**Prerequisites:** Docker Desktop running, `kind` (`brew install kind`), and kubectl 1.36 or newer (`brew install kubernetes-cli`; kind v0.33 runs Kubernetes 1.37). Stop Docker Compose first if it's running, because port-forwarding uses the same ports.
+
+Create the cluster, build the images, load them into kind, and deploy:
+
+```bash
+kind create cluster --name cloudops-bridge
+kubectl wait --for=condition=Ready node --all --timeout=120s
+docker build -t cloudops-bridge-ticket-service:phase3 -f ticket_service/Dockerfile .
+docker build -t cloudops-bridge-bridge:phase3 -f bridge/Dockerfile .
+kind load docker-image cloudops-bridge-ticket-service:phase3 cloudops-bridge-bridge:phase3 --name cloudops-bridge
+kubectl apply -f kubernetes/namespace.yaml
+kubectl apply -R -f kubernetes/
+kubectl -n cloudops-bridge rollout status deployment/ticket-service --timeout=120s
+kubectl -n cloudops-bridge rollout status deployment/bridge --timeout=120s
+```
+
+Inspect. Both Deployments should be `2/2`, with four pods `1/1 Running`:
+
+```bash
+kubectl -n cloudops-bridge get deployments,pods,services,configmaps
+```
+
+Test every endpoint from inside the cluster, through the Services:
+
+```bash
+kubectl -n cloudops-bridge exec -i deploy/bridge -- python - < kubernetes/tools/smoke_test.py
+```
+
+Or from your Mac. Run each port-forward in its own tab, then use the [example requests](#example-requests):
+
+```bash
+kubectl -n cloudops-bridge port-forward svc/ticket-service 8080:8080
+```
+
+```bash
+kubectl -n cloudops-bridge port-forward svc/bridge 8081:8081
+```
+
+First places to look when something is wrong (details in [kubernetes/README.md](kubernetes/README.md#9-troubleshooting-commands-when-each-one-helps)):
+
+```bash
+kubectl -n cloudops-bridge get pods
+kubectl -n cloudops-bridge describe pod POD_NAME
+kubectl -n cloudops-bridge logs POD_NAME --previous
+kubectl -n cloudops-bridge get events --sort-by=.lastTimestamp
+kubectl -n cloudops-bridge rollout history deployment/ticket-service
+```
+
+Clean up. The cluster can be rebuilt from scratch with the commands above:
+
+```bash
+kind delete cluster --name cloudops-bridge
+```
+
+What Phase 3 demonstrates, all verified on a live cluster:
+
+- **Liveness:** a frozen (`SIGSTOP`) uvicorn process is pulled from traffic by readiness in ~10 s and restarted by liveness in ~40 s.
+- **Reconciliation:** a deleted pod is replaced because the Deployment declares 2 replicas.
+- **Rolling update:** zero failed requests, measured from inside the cluster. This needed a `preStop` hook, because the first version dropped 4 requests to a termination race.
+- **Rollback:** a broken image stalls the rollout without losing capacity (`maxUnavailable: 0`), and `rollout undo` restores it.
+- **Security:** the containers run as UID 10001 with a read-only root filesystem, no capabilities, seccomp enabled and no privilege escalation. The ConfigMap mounts are read-only.
+
 ## Example requests
 
 Ticket API:
@@ -184,6 +253,7 @@ curl -s localhost:8080/metrics
 CloudOps Bridge:
 
 ```bash
+curl -s localhost:8081/ready
 curl -s localhost:8081/services
 curl -s -X POST localhost:8081/incidents/enrich -H 'Content-Type: application/json' -d '{"service":"ticket-api","environment":"production","alert":"HighErrorRate"}' | python3 -m json.tool
 ```
@@ -241,7 +311,9 @@ The Bridge **validates the catalog at startup** and refuses to start if a YAML f
 - **Severity depends on environment.** `HighErrorRate` is `critical` in production and `warning` in staging.
 - **Documentation gaps are visible.** `HighLatency` deliberately has no runbook. The Bridge returns `runbook: null` and adds a reminder to document the fix afterward.
 - **A test checks that every runbook referenced in the catalog exists**, so the catalog and the docs can't drift apart.
-- **The inventory lives in memory** and resets on restart. PostgreSQL arrives in a later phase.
+- **The inventory lives in memory** and resets on restart. On Kubernetes, each of the 2 ticket-service pods has its *own* inventory, so counts differ depending on which pod serves the request. PostgreSQL arrives in a later phase.
+- **ConfigMaps are generated, not hand-written.** `kubernetes/generate-configmaps.sh` builds them from `service-catalog/` and `runbooks/`, and a test fails if they drift from those files.
+- **The bridge has a separate `/ready`.** It returns 200 only when the catalog is loaded, and 503 otherwise. `/health` only means the process is alive.
 
 ## Tests
 
@@ -253,4 +325,4 @@ pip install -r requirements-dev.txt
 pytest -v
 ```
 
-Covers health, readiness, tickets, valid and invalid purchases, the sold-out case, the metrics format, enrichment, environment-based severity, the missing-runbook case, unknown service, unknown environment or alert, missing or invalid fields, malformed JSON, and catalog integrity.
+29 tests. They cover health, readiness (including bridge `/ready` returning 503 without a catalog), tickets, valid and invalid purchases, the sold-out case, the metrics format, enrichment, environment-based severity, the missing-runbook case, unknown service, unknown environment or alert, missing or invalid fields, malformed JSON, catalog integrity, and ConfigMaps matching their source files.

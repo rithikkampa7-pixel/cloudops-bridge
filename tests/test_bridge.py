@@ -18,6 +18,20 @@ def client():
         yield c
 
 
+def test_ready_when_catalog_loaded(client):
+    resp = client.get("/ready")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ready", "services": 1}
+
+
+def test_not_ready_without_catalog(client, monkeypatch):
+    # Simulate an instance whose catalog never loaded: it must not take traffic.
+    monkeypatch.delattr(client.app.state, "catalog")
+    resp = client.get("/ready")
+    assert resp.status_code == 503
+    assert resp.json()["status"] == "not ready"
+
+
 def test_enrich_high_error_rate(client):
     resp = client.post("/incidents/enrich", json=VALID_INCIDENT)
     assert resp.status_code == 200

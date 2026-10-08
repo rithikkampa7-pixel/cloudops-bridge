@@ -1,0 +1,93 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bridge
+  namespace: cloudops-bridge
+  labels:
+    app.kubernetes.io/name: bridge
+    app.kubernetes.io/part-of: cloudops-bridge
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: bridge
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: bridge
+        app.kubernetes.io/part-of: cloudops-bridge
+    spec:
+      terminationGracePeriodSeconds: 15
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: bridge
+          image: cloudops-bridge-bridge:phase3
+          imagePullPolicy: Never
+          ports:
+            - name: http
+              containerPort: 8081
+          env:
+            # Same contract as Docker Compose; Python only knows these variables.
+            - name: CATALOG_DIR
+              value: /etc/cloudops-bridge/service-catalog
+            - name: RUNBOOK_DIR
+              value: /etc/cloudops-bridge/runbooks
+          volumeMounts:
+            - name: service-catalog
+              mountPath: /etc/cloudops-bridge/service-catalog
+              readOnly: true
+            - name: runbooks
+              mountPath: /etc/cloudops-bridge/runbooks
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          lifecycle:
+            # Delay SIGTERM so the Service stops routing here before uvicorn
+            # exits. Without this, rollouts dropped ~4 requests (connection
+            # refused) because endpoint removal and SIGTERM happen concurrently.
+            preStop:
+              sleep:
+                seconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: service-catalog
+          configMap:
+            name: service-catalog
+        - name: runbooks
+          configMap:
+            name: runbooks
