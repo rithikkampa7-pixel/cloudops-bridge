@@ -1,0 +1,104 @@
+# promtool unit tests for kubernetes/monitoring/prometheus/rules-configmap.yaml.
+# These feed SYNTHETIC series to the real rules to check their logic. They are
+# not a live demonstration. Run with: ./kubernetes/monitoring/validate-alerting.sh
+# (it extracts ticket-service.yml from the ConfigMap next to this file).
+
+rule_files:
+  - ticket-service.yml
+
+evaluation_interval: 15s
+
+tests:
+  # TargetDown: pending first, firing after `for`, resolves on recovery,
+  # and ignores Prometheus's own target.
+  - interval: 15s
+    input_series:
+      - series: 'up{job="ticket-service",namespace="cloudops-bridge",pod="ticket-service-a",instance="10.0.0.1:8080"}'
+        values: '1 1 0 0 0 0 1 1 1'
+      - series: 'up{job="ticket-service",namespace="cloudops-bridge",pod="ticket-service-b",instance="10.0.0.2:8080"}'
+        values: '1 1 1 1 1 1 1 1 1'
+      - series: 'up{job="prometheus",instance="localhost:9090"}'
+        values: '0 0 0 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: TicketServiceTargetDown
+        exp_alerts: []
+      - eval_time: 45s
+        alertname: TicketServiceTargetDown
+        exp_alerts:
+          - exp_labels:
+              alertname: TicketServiceTargetDown
+              severity: warning
+              service: ticket-api
+              environment: production
+              job: ticket-service
+              namespace: cloudops-bridge
+              pod: ticket-service-a
+              instance: 10.0.0.1:8080
+            exp_annotations:
+              summary: "Prometheus cannot scrape ticket-service pod ticket-service-a"
+              description: "Scrapes of 10.0.0.1:8080 (pod ticket-service-a) have failed for at least 15s. The pod may be hung, restarting, or unreachable. Kubernetes readiness is a separate signal: check the pod as well."
+      - eval_time: 105s
+        alertname: TicketServiceTargetDown
+        exp_alerts: []
+
+  # HighErrorRate fires on sustained 5xx: 10 req/s of app traffic, 10% 500s.
+  - interval: 15s
+    input_series:
+      - series: 'http_requests_total{job="ticket-service",method="GET",path="/tickets",status="200"}'
+        values: '0+135x40'
+      - series: 'http_requests_total{job="ticket-service",method="POST",path="/tickets/purchase",status="500"}'
+        values: '0+15x40'
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: HighErrorRate
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: HighErrorRate
+        exp_alerts:
+          - exp_labels:
+              alertname: HighErrorRate
+              severity: critical
+              service: ticket-api
+              environment: production
+            exp_annotations:
+              summary: "ticket-api is returning server errors (5xx)"
+              description: "10% of application requests returned 5xx over the last 2 minutes (threshold 5%, sustained 1m)."
+
+  # 4xx is not a server failure: 20% client errors (422 + 404) must NOT fire.
+  - interval: 15s
+    input_series:
+      - series: 'http_requests_total{job="ticket-service",method="GET",path="/tickets",status="200"}'
+        values: '0+120x40'
+      - series: 'http_requests_total{job="ticket-service",method="POST",path="/tickets/purchase",status="422"}'
+        values: '0+15x40'
+      - series: 'http_requests_total{job="ticket-service",method="GET",path="unmatched",status="404"}'
+        values: '0+15x40'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: HighErrorRate
+        exp_alerts: []
+
+  # No application traffic at all (only probes and scrapes, even failing
+  # probes): no division by zero, no alert.
+  - interval: 15s
+    input_series:
+      - series: 'http_requests_total{job="ticket-service",method="GET",path="/health",status="500"}'
+        values: '0+3x40'
+      - series: 'http_requests_total{job="ticket-service",method="GET",path="/metrics",status="200"}'
+        values: '0+1x40'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: HighErrorRate
+        exp_alerts: []
+
+  # Near-zero traffic where every request fails (1 request per 15s, all 500):
+  # 100% error ratio, but below the 0.1 req/s traffic guard, so no alert.
+  - interval: 15s
+    input_series:
+      - series: 'http_requests_total{job="ticket-service",method="GET",path="/tickets",status="500"}'
+        values: '0+1x40'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: HighErrorRate
+        exp_alerts: []

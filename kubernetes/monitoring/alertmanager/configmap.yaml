@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertmanager-config
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: alertmanager
+    app.kubernetes.io/part-of: cloudops-bridge
+data:
+  alertmanager.yml: |
+    # Phase 5: Alertmanager receives, groups and tracks alerts, and exposes
+    # them through its UI/API. It sends no notifications yet: no email, chat,
+    # paging, or CloudOps Bridge webhook.
+    route:
+      receiver: no-notifications
+      # One group per alert type per service/environment, so pods failing for
+      # the same reason are reported together instead of one alert each.
+      group_by: [alertname, service, environment]
+      # Wait 10s after the first alert of a new group so related alerts can be
+      # batched (default 30s; shortened for a local demo).
+      group_wait: 10s
+      # Wait 1m before notifying about changes to an existing group (default 5m).
+      group_interval: 1m
+      # Re-notify about a still-firing group every 4h (the default).
+      repeat_interval: 4h
+
+    receivers:
+      # A receiver with no integrations is valid: alerts are still received,
+      # grouped and shown, but nothing is sent anywhere.
+      - name: no-notifications

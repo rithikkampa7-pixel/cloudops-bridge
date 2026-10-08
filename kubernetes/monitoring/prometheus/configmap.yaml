@@ -11,6 +11,19 @@ data:
     global:
       scrape_interval: 15s
       scrape_timeout: 5s
+      # Explicit: the default is 1m, which would make alert timing slow and
+      # coarse. 15s matches the scrape interval.
+      evaluation_interval: 15s
+
+    # Alert rules come from the prometheus-rules ConfigMap (rules-configmap.yaml).
+    rule_files:
+      - /etc/prometheus-rules/*.yml
+
+    # Firing and resolved alerts go to Alertmanager through its Service DNS name.
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets: ["alertmanager.monitoring.svc:9093"]
 
     scrape_configs:
       # Prometheus's own metrics. Kept as a separate job so ticket-service

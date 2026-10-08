@@ -1,0 +1,74 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-rules
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: cloudops-bridge
+data:
+  # Single source of truth for alert rules. Validated and unit-tested with
+  # promtool by kubernetes/monitoring/validate-alerting.sh.
+  #
+  # Label contract (consumed by CloudOps Bridge in a later phase):
+  #   alertname   - matches an alert in service-catalog/<service>.yaml where one exists
+  #   service     - the catalog's `service` value
+  #   environment - one of the catalog's `environments`
+  #   severity    - routing hint for Alertmanager
+  ticket-service.yml: |
+    groups:
+      - name: ticket-service
+        rules:
+          # Prometheus cannot scrape a ticket-service pod: the process is hung,
+          # crashed, or unreachable from Prometheus. Per pod (keeps pod/instance).
+          # Only job="ticket-service": Prometheus's own target is out of scope.
+          #
+          # for: 15s is a DEMO value. Kubernetes restarts a hung pod within
+          # ~45-60s, so a production-style 2-5m would never fire here - which is
+          # exactly what production wants (a self-healing blip should not page).
+          - alert: TicketServiceTargetDown
+            expr: up{job="ticket-service"} == 0
+            for: 15s
+            labels:
+              severity: warning
+              service: ticket-api
+              environment: production
+            annotations:
+              summary: "Prometheus cannot scrape ticket-service pod {{ $labels.pod }}"
+              description: >-
+                Scrapes of {{ $labels.instance }} (pod {{ $labels.pod }}) have failed
+                for at least 15s. The pod may be hung, restarting, or unreachable.
+                Kubernetes readiness is a separate signal: check the pod as well.
+
+          # Server-side failure rate: share of application requests answered
+          # with 5xx. 4xx (validation 422, sold out 409, unknown URL 404) are
+          # correct rejections, not failures, so they never count.
+          # Probes (/health, /ready) and scrapes (/metrics) are excluded from
+          # both sides, as on the dashboard.
+          #   numerator:   5xx request rate over 2m
+          #   denominator: all application request rate over 2m
+          #   threshold:   > 5%, only while traffic > 0.1 req/s (a lone failed
+          #                request at near-zero traffic is not a 100% outage)
+          #   for:         1m sustained
+          # No 5xx series -> empty numerator -> no alert. No traffic -> 0/0 =
+          # NaN -> comparison false -> no alert. Demo values; production values
+          # would come from the service's SLO (e.g. error-budget burn rate).
+          - alert: HighErrorRate
+            expr: |
+              (
+                sum(rate(http_requests_total{job="ticket-service",status=~"5..",path!~"/health|/ready|/metrics"}[2m]))
+                /
+                sum(rate(http_requests_total{job="ticket-service",path!~"/health|/ready|/metrics"}[2m]))
+              ) > 0.05
+              and
+              sum(rate(http_requests_total{job="ticket-service",path!~"/health|/ready|/metrics"}[2m])) > 0.1
+            for: 1m
+            labels:
+              severity: critical
+              service: ticket-api
+              environment: production
+            annotations:
+              summary: "ticket-api is returning server errors (5xx)"
+              description: >-
+                {{ $value | humanizePercentage }} of application requests returned 5xx
+                over the last 2 minutes (threshold 5%, sustained 1m).

@@ -18,7 +18,7 @@ On-call engineers often get paged with very little context. They lose the first 
 
 CloudOps Bridge answers these from a **service catalog**: one YAML file per service that the Development and CloudOps teams agree on as their operational handoff. The knowledge lives in version control instead of in someone's head.
 
-## Current status: Phase 4 complete
+## Current status: Phase 5 complete
 
 | Component | Status |
 |---|---|
@@ -32,13 +32,15 @@ CloudOps Bridge answers these from a **service catalog**: one YAML file per serv
 | **Kubernetes on kind**: Deployments, ClusterIP Services, ConfigMaps, liveness/readiness probes, requests/limits, hardened securityContext, rolling update and rollback | ✅ Implemented (Phase 3) |
 | HPA autoscaling | 🔜 Future work |
 | **Prometheus** with Kubernetes pod discovery, PromQL, **Grafana** with provisioned data source and *CloudOps Bridge - Ticket Service Overview* dashboard | ✅ Implemented (Phase 4) |
-| Alertmanager, alert rules, automatic alert enrichment by the bridge | 🔜 Future work |
+| **Prometheus alert rules** (`HighErrorRate` on 5xx, `TicketServiceTargetDown` on `up`) and **Alertmanager** (grouping, alert lifecycle, no notifications yet), validated with promtool/amtool | ✅ Implemented (Phase 5) |
+| CloudOps Bridge receiving alerts from Alertmanager and enriching them automatically | 🔜 Future work (Phase 6) |
+| `HighLatency` alert (the app exports no latency metric yet); live `HighErrorRate` demo (no safe way to produce 5xx without an approved app change) | 🔜 Not possible yet |
 | PostgreSQL, deployment tracking, incident timeline | 🔜 Future work |
 | Locust load testing (ticket on-sale spike) | 🔜 Future work |
 | Argo CD, GitHub Actions, Terraform, Ansible | 🔜 Future work |
 | Slack integration, dashboard, incident reports | 🔜 Future work |
 
-## Architecture (Phases 1–4)
+## Architecture (Phases 1–5)
 
 ```
                     (you, with curl, acting as Alertmanager)
@@ -80,7 +82,7 @@ cloudops-bridge/
 ├── ticket_service/Dockerfile, bridge/Dockerfile
 ├── compose.yaml             # starts both containers
 ├── kubernetes/              # Phase 3 manifests, ConfigMap generator, demo tools
-│   └── monitoring/          # Phase 4 Prometheus + Grafana manifests
+│   └── monitoring/          # Phase 4–5 Prometheus, Grafana, alert rules, Alertmanager
 ├── dashboards/              # Grafana dashboard JSON (source of truth)
 ├── .dockerignore
 ├── requirements.txt         # runtime deps (installed in images)
@@ -196,6 +198,7 @@ kubectl -n cloudops-bridge rollout status deployment/ticket-service --timeout=12
 kubectl -n cloudops-bridge rollout status deployment/bridge --timeout=120s
 kubectl -n monitoring rollout status deployment/prometheus --timeout=300s
 kubectl -n monitoring rollout status deployment/grafana --timeout=300s
+kubectl -n monitoring rollout status deployment/alertmanager --timeout=300s
 ```
 
 The second command generates a random Grafana admin password into a Kubernetes Secret only if it doesn't exist yet (it prints `NotFound` first on a fresh cluster). It's never stored in Git.
@@ -289,6 +292,31 @@ What Phase 4 demonstrates, all verified on a live cluster:
 
 Ports 19090 and 13000 are used because other local projects occupy 3000, 3001 and 9090–9094.
 
+## Alerting with Prometheus rules and Alertmanager (Phase 5)
+
+Full guide, with the alert lifecycle, rule semantics, label contract, routing, live demonstrations and measured timings: **[kubernetes/monitoring/README.md, section 10](kubernetes/monitoring/README.md#10-alerting-phase-5)**.
+
+```
+ticket-service /metrics → Prometheus evaluates rules every 15s → pending → firing → Alertmanager (grouped, tracked) → resolved
+```
+
+> **CloudOps Bridge does not receive alerts yet.** That's Phase 6. Alertmanager sends no notifications of any kind.
+
+| Alert | Fires when | Live result |
+|---|---|---|
+| `TicketServiceTargetDown` | `up{job="ticket-service"} == 0` for 15s | Frozen pod: **pending** at +19–28 s, **firing** and in Alertmanager at +34–41 s, Kubernetes restarted it, **resolved** in both at +50–56 s (three runs) |
+| `HighErrorRate` | 5xx are more than 5% of app requests over 2m, with traffic above 0.1 req/s, for 1m | Loaded and unit-tested (promtool). Stayed inactive under **7.5% 4xx** traffic, correctly. **Not fired live:** the app can't produce 5xx without an approved change |
+
+Alerts carry `alertname`, `service="ticket-api"` and `environment="production"`, matching the service catalog, so Phase 6 can map them to owners and runbooks. Alertmanager is reachable with `kubectl -n monitoring port-forward svc/alertmanager 19093:9093`, at http://localhost:19093.
+
+Validate the configuration with the real tools (Docker required, venv active):
+
+```bash
+./kubernetes/monitoring/validate-alerting.sh
+```
+
+The `for` values are demo values, chosen to be observable before Kubernetes self-heals a pod. A one-off false positive during a rolling update showed why production uses minutes instead (documented in the guide).
+
 ## Example requests
 
 Ticket API:
@@ -376,4 +404,4 @@ pip install -r requirements-dev.txt
 pytest -v
 ```
 
-38 tests. They cover health, readiness (including bridge `/ready` returning 503 without a catalog), tickets, valid and invalid purchases, the sold-out case, the metrics format, enrichment, environment-based severity, the missing-runbook case, unknown service, unknown environment or alert, missing or invalid fields, malformed JSON, catalog integrity, ConfigMaps matching their source files, and monitoring configuration: Prometheus discovery matching the Deployment's labels and port, counters always wrapped in `rate()`/`increase()`, per-pod inventory never aggregated, namespaced read-only RBAC, no committed Secrets, and the Grafana plugin regression guard.
+47 pytest tests, plus promtool rule unit tests (`./kubernetes/monitoring/validate-alerting.sh`, needs Docker). The pytest tests cover health, readiness (including bridge `/ready` returning 503 without a catalog), tickets, valid and invalid purchases, the sold-out case, the metrics format, enrichment, environment-based severity, the missing-runbook case, unknown service, unknown environment or alert, missing or invalid fields, malformed JSON, catalog integrity, ConfigMaps matching their source files, and monitoring configuration: Prometheus discovery matching the Deployment's labels and port, counters always wrapped in `rate()`/`increase()`, per-pod inventory never aggregated, namespaced read-only RBAC, no committed Secrets, the Grafana plugin regression guard, and alerting wiring: Prometheus loads the mounted rules and targets the real Alertmanager Service, HighErrorRate counts only 5xx, TargetDown is scoped to ticket-service, alert labels match the service catalog, monitoring images are pinned, and Alertmanager has no receiver integrations yet.

@@ -1,6 +1,6 @@
-# Monitoring: Prometheus + Grafana (Phase 4)
+# Monitoring and alerting: Prometheus, Grafana, Alertmanager (Phases 4–5)
 
-Prometheus discovers and scrapes every ticket-service pod. Grafana reads from Prometheus and shows one provisioned dashboard. Both run inside the kind cluster, in the `monitoring` namespace.
+Prometheus discovers and scrapes every ticket-service pod and evaluates alert rules. Grafana reads from Prometheus and shows one provisioned dashboard. Alertmanager receives the alerts Prometheus fires, groups them, and tracks them until they resolve. All three run inside the kind cluster, in the `monitoring` namespace. Alerting is covered in [section 10](#10-alerting-phase-5).
 
 > Every code block contains only commands (no `#` comments), so blocks paste cleanly into zsh. Run commands from the repository root, `~/cloudops-bridge`, after the cluster and apps from [../README.md](../README.md) are deployed.
 
@@ -12,13 +12,19 @@ Prometheus discovers and scrapes every ticket-service pod. Grafana reads from Pr
                  ┌──────┴──────┐        PromQL        ┌───────────┐
                  │ Prometheus  │ ◄─────────────────── │  Grafana  │ ◄── you, on localhost:13000
                  │ :9090       │                       │  :3000    │
-                 └─────────────┘                       └───────────┘
+                 └──────┬──────┘                       └───────────┘
                   localhost:19090                       provisioned data source + dashboard
+                        │ firing / resolved alerts (Phase 5)
+                        ▼
+                 ┌──────────────┐
+                 │ Alertmanager │ ◄── localhost:19093 (UI/API); sends no notifications yet
+                 │ :9093        │
+                 └──────────────┘
 ```
 
 | Implemented | Still future |
 |---|---|
-| Prometheus, Kubernetes service discovery and scraping, PromQL, Grafana, provisioned Prometheus data source, provisioned CloudOps dashboard | Alertmanager and alert rules, automatic alert enrichment via the bridge, HPA, Locust, PostgreSQL, Argo CD, GitHub Actions, Terraform, Ansible, Slack |
+| Prometheus, Kubernetes service discovery and scraping, PromQL, Grafana, provisioned Prometheus data source, provisioned CloudOps dashboard (Phase 4). Alert rules `HighErrorRate` and `TicketServiceTargetDown`, Alertmanager with grouping and alert lifecycle, promtool/amtool validation (Phase 5) | **CloudOps Bridge alert integration and automatic enrichment (Phase 6)**, any notification channel (email, Slack, paging), a `HighLatency` alert (no latency metric exists), HPA, Locust, PostgreSQL, Argo CD, GitHub Actions, Terraform, Ansible |
 
 ## Files
 
@@ -26,7 +32,11 @@ Prometheus discovers and scrapes every ticket-service pod. Grafana reads from Pr
 kubernetes/monitoring/
 ├── namespace.yaml                         namespace monitoring
 ├── prometheus/rbac.yaml                   ServiceAccount + namespaced Role (read pods in cloudops-bridge only)
-├── prometheus/configmap.yaml              prometheus.yml: scrape jobs and discovery
+├── prometheus/configmap.yaml              prometheus.yml: scrape jobs, discovery, rule files, Alertmanager target
+├── prometheus/rules-configmap.yaml        alert rules (Phase 5), the single source of truth
+├── alertmanager/configmap.yaml            alertmanager.yml: routing and grouping (Phase 5)
+├── alertmanager/deployment.yaml, service.yaml
+├── validate-alerting.sh                   promtool + amtool checks and rule unit tests (Phase 5)
 ├── prometheus/deployment.yaml, service.yaml
 ├── grafana/datasource-configmap.yaml      provisions the Prometheus data source
 ├── grafana/dashboard-provider-configmap.yaml
@@ -34,7 +44,9 @@ kubernetes/monitoring/
 └── grafana/deployment.yaml, service.yaml
 dashboards/ticket-service-overview.json    dashboard source of truth (outside kubernetes/: apply -R would treat .json as a manifest)
 kubernetes/tools/generate_traffic.py       deterministic traffic, run in-cluster
-kubernetes/tools/promql.py                 compact PromQL / target queries from your Mac
+kubernetes/tools/promql.py                 compact PromQL / target / rule queries from your Mac
+kubernetes/tools/alert_watch.py            timeline of up, pod state, Prometheus and Alertmanager alerts (Phase 5)
+tests/prometheus/ticket-service-alerts.test.yml   promtool unit tests for the rules (Phase 5)
 ```
 
 ## Design decisions
@@ -55,7 +67,7 @@ RBAC: the `prometheus` ServiceAccount (namespace `monitoring`) gets a **Role in 
 
 **Two jobs, so targets are easy to tell apart.** `job="ticket-service"` is the application. `job="prometheus"` is Prometheus scraping itself. Every dashboard query filters on `job="ticket-service"`.
 
-**Local ports.** The other projects on this machine already use 3000, 3001 and 9090–9094, so port-forwards use **19090** (Prometheus) and **13000** (Grafana).
+**Local ports.** The other projects on this machine already use 3000, 3001 and 9090–9094, so port-forwards use **19090** (Prometheus), **13000** (Grafana) and **19093** (Alertmanager).
 
 ## 1. Install
 
@@ -69,6 +81,7 @@ kubectl -n monitoring get secret grafana-admin || kubectl -n monitoring create s
 kubectl apply -R -f kubernetes/
 kubectl -n monitoring rollout status deployment/prometheus --timeout=300s
 kubectl -n monitoring rollout status deployment/grafana --timeout=300s
+kubectl -n monitoring rollout status deployment/alertmanager --timeout=300s
 ```
 
 The first `get secret` prints `NotFound` on a fresh cluster. That's expected, and it's what triggers the `create`.
@@ -364,7 +377,201 @@ kubectl -n monitoring rollout restart deployment/grafana
 
 Changing `prometheus.yml` needs `kubectl -n monitoring rollout restart deployment/prometheus`, which also clears its history.
 
-## 10. Troubleshooting
+## 10. Alerting (Phase 5)
+
+> **CloudOps Bridge alert integration is NOT implemented yet. That's Phase 6.** Alertmanager receives and tracks alerts but sends them nowhere: no email, chat, paging, or Bridge webhook. Nothing enriches alerts automatically yet.
+
+### Concepts
+
+- **Metrics vs alerts.** A metric is a measurement over time (`up`, `http_requests_total`). An alert is a *condition on* metrics, written in PromQL, that Prometheus evaluates on a schedule. It becomes an alert when the condition is true.
+- **Prometheus vs Alertmanager.** Prometheus *decides* whether something is wrong: it evaluates rules every 15 s (`evaluation_interval`). Alertmanager *handles what happens next*: it deduplicates, groups, silences, and routes alerts to receivers, and it tracks each alert until Prometheus says it's resolved. Grafana only visualizes.
+- **Lifecycle.** **inactive** (condition false) → **pending** (condition true, but not yet for the whole `for` duration) → **firing** (true for at least `for`; sent to Alertmanager) → **resolved** (condition false again; Prometheus tells Alertmanager, which drops it from the active list). If the condition clears while pending, the alert goes straight back to inactive and never fires.
+
+### The two rules
+
+Defined in `prometheus/rules-configmap.yaml`, loaded from `/etc/prometheus-rules/*.yml`, and evaluated every 15 s.
+
+| Alert | Expression | `for` | Severity | Meaning |
+|---|---|---|---|---|
+| `TicketServiceTargetDown` | `up{job="ticket-service"} == 0` | 15s | warning | Prometheus can't scrape a ticket-service pod: it's hung, restarting, or unreachable. One alert per pod (keeps `pod` and `instance`). Prometheus's own target is excluded |
+| `HighErrorRate` | 5xx ÷ all app requests over 2m `> 0.05` **and** app traffic `> 0.1` req/s | 1m | critical | The service itself is failing requests |
+
+**HighErrorRate in detail.**
+- **Numerator:** rate of **5xx** responses.
+- **Denominator:** rate of all application responses. Both sides exclude `/health`, `/ready` and `/metrics`, the same as the dashboard.
+- **Why not 4xx:** 4xx means the service *correctly rejected* a request (422 validation, 409 sold out, 404 unknown URL). That's normal client behavior, not a service failure, so 4xx never counts.
+- **Edge cases:**
+  - **No 5xx ever:** the numerator is empty, so no alert.
+  - **No traffic:** 0/0 is NaN, the comparison is false, so no alert.
+  - **Near-zero traffic:** the `> 0.1 req/s` guard stops one failed request at idle from reading as a 100% outage.
+- **Window and `for`:** a 2-minute rate window smooths single bad scrapes, and `for: 1m` requires the condition to hold for a minute. Because of the 2-minute window, the alert clears up to about 2 minutes *after* errors stop.
+
+**These are demo values, not production values.**
+- **HighErrorRate:** production thresholds come from the service's SLO, typically multi-window *error-budget burn-rate* alerts tuned against real baseline error rates.
+- **TicketServiceTargetDown:** `for: 15s` exists only because Kubernetes restarts a hung pod within ~45 seconds here. A production-style `for: 2–5m` would never fire for a pod that heals itself, which is exactly what production wants, since a self-healing blip shouldn't page anyone. The 15s value also has a real false-positive risk (see Observations).
+
+### Label contract (for Phase 6)
+
+Every alert carries stable identity that matches `service-catalog/ticket-api.yaml`:
+
+| Label | Value | Source of truth |
+|---|---|---|
+| `alertname` | `HighErrorRate`, `TicketServiceTargetDown` | Catalog `alerts:` keys (see gap below) |
+| `service` | `ticket-api` | Catalog `service` |
+| `environment` | `production` | One of the catalog's `environments` |
+| `severity` | `critical` / `warning` | `HighErrorRate` matches the catalog's production severity |
+
+`TicketServiceTargetDown` also carries `pod`, `instance`, `namespace` and `job`. Its `summary` and `description` annotations name the failing pod.
+
+**Known gap:** the catalog defines `HighErrorRate` and `HighLatency`, but not `TicketServiceTargetDown`. Adding it (with owner, checks and a runbook) is a Phase 6 decision; the catalog is unchanged in this phase. `HighLatency` has **no rule**, because the app exports no latency histogram or summary. A latency alert would have no real data to evaluate.
+
+### Alertmanager routing
+
+```
+route:   receiver no-notifications, group_by [alertname, service, environment]
+         group_wait 10s, group_interval 1m, repeat_interval 4h
+receivers: no-notifications  (no integrations)
+```
+
+- **`group_by`:** pods failing for the same reason, on the same service, become one group, not one notification each.
+- **`group_wait: 10s`** (default 30s): how long a new group waits to collect related alerts before its *first notification*. It does **not** delay the alert appearing in Alertmanager; measured, the alert was visible within ~1 s of Prometheus firing it.
+- **`group_interval: 1m`** (default 5m): the minimum gap between notifications about changes to the same group.
+- **`repeat_interval: 4h`** (the default): how often a still-firing group is re-sent.
+- **`no-notifications`:** a receiver with no integrations is valid configuration. There are no fake URLs. Phase 6 will add the Bridge webhook.
+
+Prometheus finds Alertmanager through DNS: `alerting.alertmanagers` targets `alertmanager.monitoring.svc:9093`.
+
+**Alertmanager deployment:** pinned `prom/alertmanager:v0.34.1`, 1 replica with `Recreate`, HA clustering disabled (`--cluster.listen-address=`, so it doesn't look for peers). UID 65534 is set explicitly, because the image user is the *name* `nobody`. Read-only root filesystem, with an `emptyDir` for `/alertmanager` (silences and notification log; ephemeral). Drop ALL capabilities, no privilege escalation, `RuntimeDefault` seccomp. Requests 10m/32Mi, limits 200m/128Mi; measured ~12 MiB.
+
+### Validate the configuration
+
+`validate-alerting.sh` extracts the exact ConfigMap contents and runs the real tools, using the same pinned images as the cluster (Docker required; activate the venv first, because extraction uses PyYAML):
+
+```bash
+source .venv/bin/activate
+./kubernetes/monitoring/validate-alerting.sh
+```
+
+Expected: `promtool check config` reports `SUCCESS` with `1 rule files found`; `check rules` finds `2 rules`; `test rules` reports `SUCCESS`; `amtool check-config` reports `SUCCESS` with `1 receivers`.
+
+The unit tests in `tests/prometheus/ticket-service-alerts.test.yml` feed **synthetic** series to the real rules:
+- TargetDown pending → firing → resolved, and never for `job="prometheus"`.
+- HighErrorRate firing at 10% 5xx.
+- **No** alert at 20% 4xx, with no traffic, with failing probes only, or at near-zero traffic.
+
+They check rule *logic*; they aren't the live demonstration. As a sanity check, changing the rule to count 4xx or dropping its `job` filter makes these tests fail.
+
+Inside the running Prometheus, against the files it actually mounted:
+
+```bash
+kubectl -n monitoring exec deploy/prometheus -- promtool check config /etc/prometheus/prometheus.yml
+```
+
+### Access and inspect
+
+Run each port-forward in its own tab (Prometheus from section 2, plus Alertmanager):
+
+```bash
+kubectl -n monitoring port-forward svc/alertmanager 19093:9093
+```
+
+The Alertmanager UI is at http://localhost:19093, and Prometheus alerts are at http://localhost:19090/alerts. From the terminal:
+
+```bash
+python3 kubernetes/tools/promql.py --rules
+curl -s localhost:19090/api/v1/alertmanagers
+curl -s 'localhost:19093/api/v2/alerts?active=true'
+kubectl -n monitoring exec deploy/alertmanager -- amtool alert query --alertmanager.url=http://localhost:9093
+kubectl -n monitoring exec deploy/alertmanager -- amtool config routes show --alertmanager.url=http://localhost:9093
+```
+
+Expected baseline:
+- `--rules` lists both rules with `state=inactive health=ok`, their expressions and their labels.
+- `alertmanagers` shows one active URL, `http://alertmanager.monitoring.svc:9093/api/v2/alerts`.
+- Alertmanager returns `[]`, and `amtool` prints only its header row.
+
+### Demo A: TicketServiceTargetDown, end to end
+
+> Deliberately freezes one ticket-service process. It's the same safe technique as Phase 3 Demo A, and Kubernetes recovers on its own.
+
+With the Prometheus and Alertmanager port-forwards running:
+
+```bash
+POD=$(kubectl -n cloudops-bridge get pods -l app.kubernetes.io/name=ticket-service -o jsonpath='{.items[0].metadata.name}')
+CID=$(kubectl -n cloudops-bridge get pod $POD -o jsonpath='{.status.containerStatuses[0].containerID}' | sed 's|containerd://||')
+HOSTPID=$(docker exec cloudops-bridge-control-plane crictl inspect --output go-template --template '{{.info.pid}}' $CID)
+echo $POD $HOSTPID
+```
+
+In a second tab, start the timeline. It prints one line every 3 seconds for 2 minutes. Pass the pod name printed above:
+
+```bash
+python3 kubernetes/tools/alert_watch.py 120 POD_NAME
+```
+
+Back in the first tab, freeze it:
+
+```bash
+docker exec cloudops-bridge-control-plane kill -STOP $HOSTPID
+```
+
+While it's firing, look at the alert as Alertmanager has it:
+
+```bash
+curl -s 'localhost:19093/api/v2/alerts?active=true' | python3 -m json.tool
+```
+
+**Observed, three runs** (seconds after the freeze; run 3 on a cluster rebuilt from scratch, using exactly these commands):
+
+| Event | Run 1 | Run 2 | Run 3 |
+|---|---|---|---|
+| Kubernetes `0/1` (readiness) | +12 | +9 | +13 |
+| Prometheus `up=0` | +18 | +9 | +13 |
+| **PENDING** | +27 | +19 | +28 |
+| **FIRING**, and **in Alertmanager** | +40 | +34 (Alertmanager had it ~1 s later) | +41 |
+| Kubernetes restart (`r=1`) | +40 | +40 | +41 (before FIRING was observed) |
+| `up=1` | +43 | +50 | +53 |
+| **Resolved** in Prometheus and **cleared** in Alertmanager | +56 | +50 | +56 |
+
+The Alertmanager record held `alertname=TicketServiceTargetDown`, `service=ticket-api`, `environment=production`, `severity=warning`, `pod`, `instance`, `namespace`, `job`, the summary and description, `state: active`, and `receivers: no-notifications`. Prometheus's own history (`ALERTS{alertname="TicketServiceTargetDown"}[5m]`) holds one `pending` and one `firing` sample per run: each state lasted exactly one 15 s evaluation. In run 3, Kubernetes had already restarted the container when the alert fired; Prometheus hadn't scraped the new container yet, so `up` was still 0. That's another example of the two signals moving independently.
+
+**Why it can also not fire.** `up=0` lasted only ~25–41 s before the restarted container was scraped successfully. The alert fires on the second evaluation that sees `up=0`, so if a scrape and a restart line up unluckily, the alert goes **pending → inactive** without firing. That's correct `for` semantics, not a bug. Repeat the demo if that happens.
+
+### Demo B: 4xx traffic must not fire HighErrorRate
+
+```bash
+kubectl -n cloudops-bridge exec -i deploy/bridge -- python - 1500 < kubernetes/tools/generate_traffic.py
+```
+
+While it runs (about 150 s), compare the client-error ratio with the rule's server-error ratio:
+
+```bash
+python3 kubernetes/tools/promql.py 'sum(rate(http_requests_total{job="ticket-service",path!~"/health|/ready|/metrics",status=~"4.."}[2m])) / sum(rate(http_requests_total{job="ticket-service",path!~"/health|/ready|/metrics"}[2m]))'
+python3 kubernetes/tools/promql.py --rules
+```
+
+**Observed:** 4xx ratio **7.2–7.5%**, above the 5% threshold, with traffic of 4.5–12 req/s for more than 2.5 minutes. Despite that, HighErrorRate stayed `inactive`, Alertmanager stayed `[]`, and `ALERTS{alertname="HighErrorRate"}` was never recorded. A rule that counted 4xx would have fired.
+
+### HighErrorRate cannot be fired live yet
+
+The ticket service has **no natural, safe way to return 5xx**. Its only 500 path is the handler for *unexpected* exceptions, and no request reaches it: invalid input gets 422, sold out gets 409. The rule is loaded, its logic is covered by the promtool unit tests, and the 4xx negative case was verified live. **A live end-to-end HighErrorRate demonstration needs an approved failure-injection mechanism**, a decision deliberately left open. No failure endpoint was added.
+
+### Observations from testing
+
+- **Default rule evaluation is 1 minute.** The Phase 4 config didn't set `evaluation_interval`, so it's now explicit (15 s).
+- **Alertmanager visibility vs notification.** Alerts appear in Alertmanager about 1 s after firing; `group_wait` only delays notifications.
+- **`endsAt`.** Prometheus sends firing alerts with `endsAt` = now + 4 minutes and refreshes it on every evaluation. If Prometheus stopped, Alertmanager would auto-resolve after 4 minutes. On recovery, Prometheus sends the resolution explicitly, and the alert left Alertmanager's active list immediately.
+- **Readiness vs scrape health** differed in timing again: in run 1 Kubernetes went NotReady 6 s before `up=0`; in run 2 they happened together.
+- **False positive during a rolling update (observed once, not reproduced).** In the first Phase 3 regression rollout, `TicketServiceTargetDown` fired for an old, terminating pod. That pod stayed in the Kubernetes API, and so in Prometheus discovery, for ~40 s after deletion, while its server had already stopped accepting connections. That gave `up=0` long enough for the 15 s `for`. Four repeat attempts showed normal termination: old pods left discovery 6–12 s after deletion with no alert. These were two rollouts under traffic, one without, and one right after a freeze-and-restart. The root cause of that one slow termination wasn't identified. The lesson stands: a 15 s `for` is short enough to page on a slow pod shutdown, and a production `for` of several minutes absorbs it. Dropping NotReady or terminating pods from discovery would hide this alert, but it would also hide the frozen-pod failure the alert exists to catch.
+
+### Limitations
+
+- No live HighErrorRate demonstration (see above). No HighLatency rule (no metric).
+- Alertmanager state is in an `emptyDir`, so silences are lost when the pod restarts. There's a single replica with no HA.
+- No notifications are sent anywhere. Bridge integration and enrichment are Phase 6.
+- The demo `for` values trade realism for observability, as documented above.
+
+## 11. Troubleshooting
 
 | Symptom | Check |
 |---|---|
@@ -373,9 +580,12 @@ Changing `prometheus.yml` needs `kubectl -n monitoring rollout restart deploymen
 | Panels say "No data" | Time range (top right) too old or too new? Rates are 0 a minute after traffic stops. Check that the data source health command above says *Successfully queried* |
 | Grafana errors `Plugin not registered` | `kubectl -n monitoring logs deploy/grafana \| grep -i 'Failed to install plugin'`. `GF_PLUGINS_PREINSTALL_DISABLED` must be `true` while the root filesystem is read-only |
 | Grafana pod in `CreateContainerConfigError` | The `grafana-admin` Secret is missing. Run the create command from section 1 |
+| `--rules` shows no rule group | `kubectl -n monitoring get configmap prometheus-rules`, then `kubectl -n monitoring exec deploy/prometheus -- ls /etc/prometheus-rules` and the `promtool check config` command in section 10. Rule changes need `kubectl -n monitoring rollout restart deployment/prometheus` |
+| Alert FIRING in Prometheus but not in Alertmanager | `curl -s localhost:19090/api/v1/alertmanagers` must list one active URL; `python3 kubernetes/tools/promql.py 'prometheus_notifications_errors_total'` should stay 0; `kubectl -n monitoring logs deploy/alertmanager` |
+| Target-down demo went pending → inactive without firing | The pod restarted before the `for` was satisfied (see Demo A). Run it again |
 | port-forward: `address already in use` | Another project uses that port. Pick a different local port, for example `29090:9090` |
 
-## 11. Cleanup
+## 12. Cleanup
 
 Remove only monitoring (the Secret goes with the namespace):
 

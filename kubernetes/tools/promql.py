@@ -6,6 +6,7 @@ Needs a port-forward first:
 Usage:
   python3 kubernetes/tools/promql.py 'up{job="ticket-service"}'
   python3 kubernetes/tools/promql.py --targets
+  python3 kubernetes/tools/promql.py --rules
 
 Standard library only. Prometheus's raw JSON is verbose; this prints one line
 per series (labels and value) so results are easy to read and compare.
@@ -38,6 +39,19 @@ if sys.argv[1] == "--targets":
         who = labels.get("pod", labels.get("instance"))
         error = f"  error={t['lastError']}" if t["lastError"] else ""
         print(f"{labels['job']:15} {who:34} {t['scrapeUrl']:38} {t['health'].upper():5}{error}")
+    sys.exit(0)
+
+if sys.argv[1] == "--rules":
+    for group in get("/api/v1/rules", type="alert")["groups"]:
+        print(f"group {group['name']}  file={group['file']}  interval={group['interval']}s")
+        for rule in group["rules"]:
+            labels = ",".join(f"{k}={v}" for k, v in sorted(rule["labels"].items()))
+            print(f"  {rule['name']:24} state={rule['state']:8} health={rule['health']}  "
+                  f"for={rule['duration']}s  labels: {labels}")
+            print(f"  {'':24} expr: {' '.join(rule['query'].split())}")
+            for alert in rule.get("alerts", []):
+                who = alert["labels"].get("pod", "")
+                print(f"  {'':24} -> {alert['state'].upper()} {who} since {alert.get('activeAt', '')[:19]}")
     sys.exit(0)
 
 data = get("/api/v1/query", query=sys.argv[1])

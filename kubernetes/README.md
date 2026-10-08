@@ -12,7 +12,7 @@ kubernetes/
 ├── bridge/deployment.yaml             same, plus read-only ConfigMap mounts
 ├── bridge/service.yaml                ClusterIP :8081
 ├── config/                            GENERATED ConfigMaps (do not edit)
-├── monitoring/                        Phase 4: Prometheus + Grafana (see monitoring/README.md)
+├── monitoring/                        Phases 4–5: Prometheus, Grafana, alert rules, Alertmanager (see monitoring/README.md)
 ├── generate-configmaps.sh             regenerates generated ConfigMaps from service-catalog/, runbooks/, dashboards/
 └── tools/
     ├── smoke_test.py                  in-cluster check of every endpoint
@@ -78,9 +78,10 @@ kubectl -n cloudops-bridge rollout status deployment/ticket-service --timeout=12
 kubectl -n cloudops-bridge rollout status deployment/bridge --timeout=120s
 kubectl -n monitoring rollout status deployment/prometheus --timeout=300s
 kubectl -n monitoring rollout status deployment/grafana --timeout=300s
+kubectl -n monitoring rollout status deployment/alertmanager --timeout=300s
 ```
 
-The first deploy pulls the Prometheus and Grafana images from Docker Hub, which can take a minute.
+The first deploy pulls the Prometheus, Grafana and Alertmanager images from Docker Hub, which can take a minute.
 
 ## 5. Inspect
 

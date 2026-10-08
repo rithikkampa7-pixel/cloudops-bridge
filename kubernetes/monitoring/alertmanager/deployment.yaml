@@ -1,46 +1,45 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: prometheus
+  name: alertmanager
   namespace: monitoring
   labels:
-    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/name: alertmanager
     app.kubernetes.io/part-of: cloudops-bridge
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: prometheus
-  # Recreate: two Prometheus pods writing the same data directory is never
-  # wanted, and history is ephemeral anyway.
+      app.kubernetes.io/name: alertmanager
+  # Single instance with local state; never two at once.
   strategy:
     type: Recreate
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: prometheus
+        app.kubernetes.io/name: alertmanager
         app.kubernetes.io/part-of: cloudops-bridge
     spec:
-      serviceAccountName: prometheus
       securityContext:
-        # The image's user is the name "nobody"; runAsNonRoot cannot verify a
-        # name, so the numeric UID (65534 = nobody) must be explicit.
+        # Image user is the name "nobody"; runAsNonRoot needs the number.
         runAsNonRoot: true
         runAsUser: 65534
         runAsGroup: 65534
         seccompProfile:
           type: RuntimeDefault
       containers:
-        - name: prometheus
-          image: prom/prometheus:v3.14.0
+        - name: alertmanager
+          image: prom/alertmanager:v0.34.1
           imagePullPolicy: IfNotPresent
           args:
-            - --config.file=/etc/prometheus/prometheus.yml
-            - --storage.tsdb.path=/prometheus
-            - --storage.tsdb.retention.time=6h
+            - --config.file=/etc/alertmanager/alertmanager.yml
+            - --storage.path=/alertmanager
+            # One replica: disable the HA gossip cluster (it would otherwise
+            # listen on 9094 and look for peers that do not exist).
+            - --cluster.listen-address=
           ports:
             - name: http
-              containerPort: 9090
+              containerPort: 9093
           readinessProbe:
             httpGet:
               path: /-/ready
@@ -59,11 +58,11 @@ spec:
             failureThreshold: 4
           resources:
             requests:
-              cpu: 50m
-              memory: 128Mi
+              cpu: 10m
+              memory: 32Mi
             limits:
-              cpu: 500m
-              memory: 512Mi
+              cpu: 200m
+              memory: 128Mi
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -71,22 +70,15 @@ spec:
               drop: ["ALL"]
           volumeMounts:
             - name: config
-              mountPath: /etc/prometheus
-              readOnly: true
-            - name: rules
-              mountPath: /etc/prometheus-rules
+              mountPath: /etc/alertmanager
               readOnly: true
             - name: data
-              mountPath: /prometheus
+              mountPath: /alertmanager
       volumes:
         - name: config
           configMap:
-            name: prometheus-config
-        - name: rules
-          configMap:
-            name: prometheus-rules
-        # Ephemeral TSDB: history is lost when the pod or cluster goes away.
-        # Configuration (scrape config, dashboards) lives in Git instead.
+            name: alertmanager-config
+        # Silences and notification log. Ephemeral: lost with the pod.
         - name: data
           emptyDir:
-            sizeLimit: 1Gi
+            sizeLimit: 64Mi
