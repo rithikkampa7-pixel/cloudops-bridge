@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-provider
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/part-of: cloudops-bridge
+data:
+  cloudops-bridge.yaml: |
+    apiVersion: 1
+    providers:
+      - name: cloudops-bridge
+        folder: CloudOps Bridge
+        type: file
+        disableDeletion: true
+        # Git is the source of truth; UI edits cannot be saved back.
+        allowUiUpdates: false
+        options:
+          path: /var/lib/grafana-dashboards

@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: cloudops-bridge
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      scrape_timeout: 5s
+
+    scrape_configs:
+      # Prometheus's own metrics. Kept as a separate job so ticket-service
+      # targets are always selected with job="ticket-service".
+      - job_name: prometheus
+        static_configs:
+          - targets: ["localhost:9090"]
+
+      # Ticket Service pods, discovered through the Kubernetes API.
+      # Prometheus watches pods, so a replacement pod becomes a target within
+      # seconds with no config change. Pods are scraped directly on their pod
+      # IP (not through the Service), so every replica is scraped separately.
+      - job_name: ticket-service
+        metrics_path: /metrics
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: ["cloudops-bridge"]
+            selectors:
+              - role: pod
+                label: app.kubernetes.io/name=ticket-service
+        relabel_configs:
+          # One target per pod: the container port named "http" (8080).
+          - source_labels: [__meta_kubernetes_pod_container_port_name]
+            regex: http
+            action: keep
+          # Skip pods that have no IP yet (Pending) or have finished.
+          - source_labels: [__meta_kubernetes_pod_phase]
+            regex: Running
+            action: keep
+          # Keep pod identity: inventory is per pod, so we need to know
+          # which replica reported which value.
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod

@@ -12,11 +12,16 @@ kubernetes/
 ├── bridge/deployment.yaml             same, plus read-only ConfigMap mounts
 ├── bridge/service.yaml                ClusterIP :8081
 ├── config/                            GENERATED ConfigMaps (do not edit)
-├── generate-configmaps.sh             regenerates config/ from service-catalog/ and runbooks/
+├── monitoring/                        Phase 4: Prometheus + Grafana (see monitoring/README.md)
+├── generate-configmaps.sh             regenerates generated ConfigMaps from service-catalog/, runbooks/, dashboards/
 └── tools/
     ├── smoke_test.py                  in-cluster check of every endpoint
-    └── check_availability.py          polls a Service during rollouts and counts failures
+    ├── check_availability.py          polls a Service during rollouts and counts failures
+    ├── generate_traffic.py            deterministic traffic for monitoring checks (Phase 4)
+    └── promql.py                      compact PromQL / target queries from your Mac (Phase 4)
 ```
+
+Monitoring (Prometheus, Grafana, dashboard, PromQL) is documented in **[monitoring/README.md](monitoring/README.md)**.
 
 ## 1. Prerequisites
 
@@ -63,14 +68,19 @@ kind load docker-image cloudops-bridge-ticket-service:phase3 cloudops-bridge-bri
 
 ## 4. Deploy
 
-The namespace is applied first because `apply -R` processes files alphabetically and `bridge/` would come before `namespace.yaml`.
+The namespaces are applied first because `apply -R` processes files alphabetically, and `bridge/` would come before `namespace.yaml`. The second command creates a random Grafana admin password as a Secret, **only if it doesn't exist yet**. It's never stored in Git (see [monitoring/README.md](monitoring/README.md#1-install)). On a fresh cluster it first prints `NotFound`, which is expected.
 
 ```bash
-kubectl apply -f kubernetes/namespace.yaml
+kubectl apply -f kubernetes/namespace.yaml -f kubernetes/monitoring/namespace.yaml
+kubectl -n monitoring get secret grafana-admin || kubectl -n monitoring create secret generic grafana-admin --from-literal=admin-password="$(openssl rand -base64 24)"
 kubectl apply -R -f kubernetes/
 kubectl -n cloudops-bridge rollout status deployment/ticket-service --timeout=120s
 kubectl -n cloudops-bridge rollout status deployment/bridge --timeout=120s
+kubectl -n monitoring rollout status deployment/prometheus --timeout=300s
+kubectl -n monitoring rollout status deployment/grafana --timeout=300s
 ```
+
+The first deploy pulls the Prometheus and Grafana images from Docker Hub, which can take a minute.
 
 ## 5. Inspect
 
@@ -82,7 +92,7 @@ kubectl -n cloudops-bridge get services
 kubectl -n cloudops-bridge get configmaps
 ```
 
-Expected: both Deployments `2/2`, four pods `1/1 Running` with 0 restarts, two `ClusterIP` Services, and ConfigMaps `service-catalog` and `runbooks`.
+Expected: both Deployments `2/2`, four pods `1/1 Running` with 0 restarts, two `ClusterIP` Services, and ConfigMaps `service-catalog` and `runbooks`. Monitoring runs separately in namespace `monitoring`: `kubectl -n monitoring get pods`.
 
 ## 6. Test the APIs
 
@@ -370,7 +380,7 @@ kubectl -n cloudops-bridge rollout status deployment/bridge
 
 ## 10. Updating configuration
 
-`service-catalog/*.yaml` and `runbooks/*.md` are the source of truth. The files in `kubernetes/config/` are generated from them, and `tests/test_kubernetes_config.py` fails if they drift. After editing a catalog or runbook:
+`service-catalog/*.yaml`, `runbooks/*.md` and `dashboards/*.json` are the source of truth. Their ConfigMaps are generated, and `tests/test_kubernetes_config.py` fails if they drift. After editing a catalog or runbook:
 
 ```bash
 ./kubernetes/generate-configmaps.sh

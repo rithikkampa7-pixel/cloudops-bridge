@@ -18,7 +18,7 @@ On-call engineers often get paged with very little context. They lose the first 
 
 CloudOps Bridge answers these from a **service catalog**: one YAML file per service that the Development and CloudOps teams agree on as their operational handoff. The knowledge lives in version control instead of in someone's head.
 
-## Current status: Phase 3 complete
+## Current status: Phase 4 complete
 
 | Component | Status |
 |---|---|
@@ -26,18 +26,19 @@ CloudOps Bridge answers these from a **service catalog**: one YAML file per serv
 | CloudOps Bridge enrichment API (FastAPI) | ✅ Implemented |
 | YAML service catalog | ✅ Implemented |
 | Markdown runbook (`HighErrorRate`) | ✅ Implemented |
-| `/metrics` in Prometheus text format | ✅ Implemented (no Prometheus server yet) |
+| `/metrics` in Prometheus text format | ✅ Implemented |
 | Automated tests (pytest) | ✅ Implemented |
 | **Docker images + Docker Compose** (non-root, health checks, read-only config mounts) | ✅ Implemented (Phase 2) |
 | **Kubernetes on kind**: Deployments, ClusterIP Services, ConfigMaps, liveness/readiness probes, requests/limits, hardened securityContext, rolling update and rollback | ✅ Implemented (Phase 3) |
 | HPA autoscaling | 🔜 Future work |
-| Prometheus server, Alertmanager, Grafana | 🔜 Future work |
+| **Prometheus** with Kubernetes pod discovery, PromQL, **Grafana** with provisioned data source and *CloudOps Bridge - Ticket Service Overview* dashboard | ✅ Implemented (Phase 4) |
+| Alertmanager, alert rules, automatic alert enrichment by the bridge | 🔜 Future work |
 | PostgreSQL, deployment tracking, incident timeline | 🔜 Future work |
 | Locust load testing (ticket on-sale spike) | 🔜 Future work |
 | Argo CD, GitHub Actions, Terraform, Ansible | 🔜 Future work |
 | Slack integration, dashboard, incident reports | 🔜 Future work |
 
-## Architecture (Phases 1–3)
+## Architecture (Phases 1–4)
 
 ```
                     (you, with curl, acting as Alertmanager)
@@ -79,6 +80,8 @@ cloudops-bridge/
 ├── ticket_service/Dockerfile, bridge/Dockerfile
 ├── compose.yaml             # starts both containers
 ├── kubernetes/              # Phase 3 manifests, ConfigMap generator, demo tools
+│   └── monitoring/          # Phase 4 Prometheus + Grafana manifests
+├── dashboards/              # Grafana dashboard JSON (source of truth)
 ├── .dockerignore
 ├── requirements.txt         # runtime deps (installed in images)
 ├── requirements-dev.txt     # runtime + test deps (local development)
@@ -186,11 +189,16 @@ kubectl wait --for=condition=Ready node --all --timeout=120s
 docker build -t cloudops-bridge-ticket-service:phase3 -f ticket_service/Dockerfile .
 docker build -t cloudops-bridge-bridge:phase3 -f bridge/Dockerfile .
 kind load docker-image cloudops-bridge-ticket-service:phase3 cloudops-bridge-bridge:phase3 --name cloudops-bridge
-kubectl apply -f kubernetes/namespace.yaml
+kubectl apply -f kubernetes/namespace.yaml -f kubernetes/monitoring/namespace.yaml
+kubectl -n monitoring get secret grafana-admin || kubectl -n monitoring create secret generic grafana-admin --from-literal=admin-password="$(openssl rand -base64 24)"
 kubectl apply -R -f kubernetes/
 kubectl -n cloudops-bridge rollout status deployment/ticket-service --timeout=120s
 kubectl -n cloudops-bridge rollout status deployment/bridge --timeout=120s
+kubectl -n monitoring rollout status deployment/prometheus --timeout=300s
+kubectl -n monitoring rollout status deployment/grafana --timeout=300s
 ```
+
+The second command generates a random Grafana admin password into a Kubernetes Secret only if it doesn't exist yet (it prints `NotFound` first on a fresh cluster). It's never stored in Git.
 
 Inspect. Both Deployments should be `2/2`, with four pods `1/1 Running`:
 
@@ -237,6 +245,49 @@ What Phase 3 demonstrates, all verified on a live cluster:
 - **Rolling update:** zero failed requests, measured from inside the cluster. This needed a `preStop` hook, because the first version dropped 4 requests to a termination race.
 - **Rollback:** a broken image stalls the rollout without losing capacity (`maxUnavailable: 0`), and `rollout undo` restores it.
 - **Security:** the containers run as UID 10001 with a read-only root filesystem, no capabilities, seccomp enabled and no privilege escalation. The ConfigMap mounts are read-only.
+
+## Monitoring with Prometheus and Grafana (Phase 4)
+
+Full guide, with discovery details, PromQL, controlled tests, security decisions and troubleshooting: **[kubernetes/monitoring/README.md](kubernetes/monitoring/README.md)**.
+
+```
+real request → ticket-service pod /metrics → Prometheus (scrapes every pod, found via the Kubernetes API) → PromQL → Grafana dashboard
+```
+
+Prometheus and Grafana deploy with everything else in the Phase 3 steps above (namespace `monitoring`). Then, with each port-forward in its own tab:
+
+```bash
+kubectl -n monitoring port-forward svc/prometheus 19090:9090
+```
+
+```bash
+kubectl -n monitoring port-forward svc/grafana 13000:3000
+```
+
+Check that both ticket-service pods are discovered and `UP`, and send known traffic:
+
+```bash
+python3 kubernetes/tools/promql.py --targets
+kubectl -n cloudops-bridge exec -i deploy/bridge -- python - 600 < kubernetes/tools/generate_traffic.py
+python3 kubernetes/tools/promql.py 'sum by (path, status) (http_requests_total{job="ticket-service",path!~"/health|/ready|/metrics"})'
+```
+
+Copy the generated Grafana password to the clipboard without printing it, then open http://localhost:13000 and log in as `admin`:
+
+```bash
+kubectl -n monitoring get secret grafana-admin -o jsonpath='{.data.admin-password}' | base64 -d | pbcopy
+```
+
+What Phase 4 demonstrates, all verified on a live cluster:
+
+- **Discovery:** Prometheus watches the Kubernetes API for `app.kubernetes.io/name=ticket-service` pods and scrapes each one directly. A replacement pod was a target within 3 seconds, with no config change.
+- **Exact numbers:** 600 / 60 / 30 / 24 requests and 120 tickets sent; the same counts in Prometheus.
+- **Honest multi-replica data:** `tickets_available` is shown per pod (for example 4942 and 4938), never summed, because each pod has its own inventory.
+- **Failure visibility:** a frozen pod went to `up=0` within one scrape interval. In one run that was before Kubernetes marked it NotReady, in another after (the order depends on where each probe or scrape cycle falls), and `up` stayed 0 for a few seconds after the pod was Ready again. They're independent signals.
+- **Real issues found and fixed:** Grafana 13's plugin installer broke the Prometheus data source under a read-only root filesystem; the Grafana image put its user in the root group; the Prometheus image's non-numeric user blocked `runAsNonRoot`.
+- **Declarative:** the data source, dashboard and scrape config come from Git. Monitoring *history* is ephemeral by design.
+
+Ports 19090 and 13000 are used because other local projects occupy 3000, 3001 and 9090–9094.
 
 ## Example requests
 
@@ -325,4 +376,4 @@ pip install -r requirements-dev.txt
 pytest -v
 ```
 
-29 tests. They cover health, readiness (including bridge `/ready` returning 503 without a catalog), tickets, valid and invalid purchases, the sold-out case, the metrics format, enrichment, environment-based severity, the missing-runbook case, unknown service, unknown environment or alert, missing or invalid fields, malformed JSON, catalog integrity, and ConfigMaps matching their source files.
+38 tests. They cover health, readiness (including bridge `/ready` returning 503 without a catalog), tickets, valid and invalid purchases, the sold-out case, the metrics format, enrichment, environment-based severity, the missing-runbook case, unknown service, unknown environment or alert, missing or invalid fields, malformed JSON, catalog integrity, ConfigMaps matching their source files, and monitoring configuration: Prometheus discovery matching the Deployment's labels and port, counters always wrapped in `rate()`/`increase()`, per-pod inventory never aggregated, namespaced read-only RBAC, no committed Secrets, and the Grafana plugin regression guard.
