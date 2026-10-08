@@ -1,0 +1,26 @@
+# Local Docker Compose setup for Phase 2.
+# Health checks are defined once, in each Dockerfile, and inherited here.
+# The two services do not call each other yet, so the default network is enough.
+
+services:
+  ticket-service:
+    build:
+      context: .
+      dockerfile: ticket_service/Dockerfile
+    image: cloudops-bridge/ticket-service:phase2
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  bridge:
+    build:
+      context: .
+      dockerfile: bridge/Dockerfile
+    image: cloudops-bridge/bridge:phase2
+    ports:
+      - "8081:8081"
+    volumes:
+      # Read-only: the bridge can read operational config but never change it.
+      - ./service-catalog:/etc/cloudops-bridge/service-catalog:ro
+      - ./runbooks:/etc/cloudops-bridge/runbooks:ro
+    restart: unless-stopped

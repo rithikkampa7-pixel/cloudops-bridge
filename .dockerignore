@@ -1,0 +1,24 @@
+# Keep the build context small and free of local/dev artifacts.
+# Dockerfiles COPY only what each service needs; this mainly stops large or
+# sensitive files from being sent to the Docker daemon at all.
+.git
+.gitignore
+.venv
+venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.coverage
+htmlcov
+tests
+.env
+.env.*
+*.pem
+*.key
+.vscode
+.idea
+.DS_Store
+**/Dockerfile
+compose.yaml
+.dockerignore
+README.md

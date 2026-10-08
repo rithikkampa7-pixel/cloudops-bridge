@@ -18,7 +18,7 @@ On-call engineers often get paged with very little context. They lose the first 
 
 CloudOps Bridge answers these from a **service catalog**: one YAML file per service that the Development and CloudOps teams agree on as their operational handoff. The knowledge lives in version control instead of in someone's head.
 
-## Current status: Phase 1
+## Current status: Phase 2 complete
 
 | Component | Status |
 |---|---|
@@ -28,14 +28,15 @@ CloudOps Bridge answers these from a **service catalog**: one YAML file per serv
 | Markdown runbook (`HighErrorRate`) | ✅ Implemented |
 | `/metrics` in Prometheus text format | ✅ Implemented (no Prometheus server yet) |
 | Automated tests (pytest) | ✅ Implemented |
-| Docker, Kubernetes (kind), HPA autoscaling | 🔜 Future work |
+| **Docker images + Docker Compose** (non-root, health checks, read-only config mounts) | ✅ Implemented (Phase 2) |
+| Kubernetes (kind), HPA autoscaling | 🔜 Future work |
 | Prometheus, Alertmanager, Grafana | 🔜 Future work |
 | PostgreSQL, deployment tracking, incident timeline | 🔜 Future work |
 | Locust load testing (ticket on-sale spike) | 🔜 Future work |
 | Argo CD, GitHub Actions, Terraform, Ansible | 🔜 Future work |
 | Slack-style notifications, dashboard, incident reports | 🔜 Future work |
 
-## Phase 1 architecture
+## Architecture (Phases 1–2)
 
 ```
                     (you, with curl, acting as Alertmanager)
@@ -52,7 +53,9 @@ CloudOps Bridge answers these from a **service catalog**: one YAML file per serv
 +---------------------+       Enriched incident (JSON)
 ```
 
-The two services **do not call each other** in Phase 1. The Ticket API is the system being monitored. The Bridge is the incident-context tool. In a later phase, Prometheus will scrape the Ticket API's `/metrics` and Alertmanager will send alerts to the Bridge automatically.
+In Phase 2 each box runs in its own container (see [Run with Docker](#run-with-docker-phase-2)); the design is unchanged.
+
+The two services **do not call each other** yet. The Ticket API is the system being monitored. The Bridge is the incident-context tool. In a later phase, Prometheus will scrape the Ticket API's `/metrics` and Alertmanager will send alerts to the Bridge automatically.
 
 ## Project layout
 
@@ -71,51 +74,126 @@ cloudops-bridge/
 ├── runbooks/
 │   └── high-error-rate.md
 ├── tests/
-├── requirements.txt
+├── ticket_service/Dockerfile, bridge/Dockerfile
+├── compose.yaml             # starts both containers
+├── .dockerignore
+├── requirements.txt         # runtime deps (installed in images)
+├── requirements-dev.txt     # runtime + test deps (local development)
 └── pytest.ini
 ```
 
-## Setup (macOS)
+## Run locally without Docker (macOS)
 
 Requires Python 3.10+ (`python3 --version`).
 
+> Code blocks in this README contain only commands, no `#` comments, so they paste cleanly into zsh (the macOS default shell), which doesn't treat `#` as a comment at an interactive prompt.
+
+Create an isolated Python environment, activate it (your prompt then shows `(.venv)`), and install the pinned app and test dependencies:
+
 ```bash
 cd cloudops-bridge
-python3 -m venv .venv               # create an isolated Python environment
-source .venv/bin/activate           # activate it (prompt shows "(.venv)")
-pip install -r requirements.txt     # install pinned dependencies
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-dev.txt
 ```
-
-## Run
 
 Use two terminal tabs, and activate the venv in each one (`source .venv/bin/activate`).
 
-```bash
-# Tab 1: Ticket API on port 8080
-uvicorn ticket_service.main:app --port 8080 --reload
+Tab 1, Ticket API on port 8080:
 
-# Tab 2: CloudOps Bridge on port 8081
+```bash
+uvicorn ticket_service.main:app --port 8080 --reload
+```
+
+Tab 2, CloudOps Bridge on port 8081:
+
+```bash
 uvicorn bridge.main:app --port 8081 --reload
 ```
 
 Interactive API docs: http://localhost:8080/docs and http://localhost:8081/docs
 
-## Example requests
+## Run with Docker (Phase 2)
+
+**Prerequisites:** [Docker Desktop for Mac](https://www.docker.com/products/docker-desktop/) running (`docker version` shows a Server section). Ports 8080 and 8081 must be free. Stop the local uvicorn servers first if they're running.
+
+Build both images and start them in the background, then check status. Both should show `(healthy)` after about 5–10 seconds:
 
 ```bash
-# Ticket API
+docker compose up --build -d
+docker compose ps
+```
+
+Every curl request in [Example requests](#example-requests) works unchanged against the containers.
+
+| What | How it's done |
+|---|---|
+| Base image | `python:3.13.16-slim-trixie` (pinned, never `latest`) |
+| Non-root | Runs as `app` (UID 10001). App code is owned by root, so the process can't modify it |
+| Health checks | Docker `HEALTHCHECK` calls `/health` using Python's standard library (no curl in the image) |
+| Config | Bridge reads `CATALOG_DIR=/etc/cloudops-bridge/service-catalog` and `RUNBOOK_DIR=/etc/cloudops-bridge/runbooks`, bind-mounted **read-only** from the repo. Edit the YAML, then `docker compose restart bridge`, with no rebuild |
+| Shutdown | uvicorn runs as PID 1 (exec-form `CMD`), so `docker compose down` triggers a graceful shutdown |
+| Image contents | Runtime dependencies only (`requirements.txt`). No tests, pytest, or dev tools |
+
+The catalog is deliberately **not** baked into the bridge image. Without the mount, the bridge refuses to start (`Catalog directory not found`). That's the same fail-fast behavior as a broken YAML file.
+
+**Logs.** `-f` follows the log live; press Ctrl+C to stop following:
+
+```bash
+docker compose logs ticket-service
+docker compose logs -f bridge
+```
+
+`127.0.0.1` entries are Docker's health check running inside the container. Requests from your Mac arrive from Docker Desktop's gateway (`192.168.65.1`).
+
+**Verify non-root.** Expect `uid=10001(app)` from both containers, and `Uid: 10001 ...` for PID 1, the uvicorn process itself:
+
+```bash
+docker compose exec ticket-service id
+docker compose exec bridge id
+docker compose exec bridge grep Uid /proc/1/status
+```
+
+**Verify config is read-only.** This command is *expected to fail* with `Read-only file system`, and the inspect should print `RW=false` twice:
+
+```bash
+docker compose exec bridge touch /etc/cloudops-bridge/service-catalog/test
+docker inspect cloudops-bridge-bridge-1 --format '{{range .Mounts}}{{.Destination}} RW={{.RW}}{{"\n"}}{{end}}'
+```
+
+**Stop** and remove the containers and network:
+
+```bash
+docker compose down
+```
+
+Inventory is in memory, so it resets to 5000 whenever the ticket-service container is recreated.
+
+## Example requests
+
+Ticket API:
+
+```bash
 curl -s localhost:8080/health
 curl -s localhost:8080/ready
 curl -s localhost:8080/tickets
-curl -s -X POST localhost:8080/tickets/purchase \
-  -H 'Content-Type: application/json' -d '{"quantity": 2}'
+curl -s -X POST localhost:8080/tickets/purchase -H 'Content-Type: application/json' -d '{"quantity": 2}'
 curl -s localhost:8080/metrics
+```
 
-# CloudOps Bridge
-curl -s -X POST localhost:8081/incidents/enrich \
-  -H 'Content-Type: application/json' \
-  -d '{"service":"ticket-api","environment":"production","alert":"HighErrorRate"}' \
-  | python3 -m json.tool
+CloudOps Bridge:
+
+```bash
+curl -s localhost:8081/services
+curl -s -X POST localhost:8081/incidents/enrich -H 'Content-Type: application/json' -d '{"service":"ticket-api","environment":"production","alert":"HighErrorRate"}' | python3 -m json.tool
+```
+
+Error cases. `-w` prints the HTTP status code; expect `[404]`, `[422]`, `[422]`:
+
+```bash
+curl -s -w ' [%{http_code}]\n' -X POST localhost:8081/incidents/enrich -H 'Content-Type: application/json' -d '{"service":"payments","environment":"production","alert":"HighErrorRate"}'
+curl -s -w ' [%{http_code}]\n' -X POST localhost:8081/incidents/enrich -H 'Content-Type: application/json' -d '{"service":"ticket-api"}'
+curl -s -w ' [%{http_code}]\n' -X POST localhost:8080/tickets/purchase -H 'Content-Type: application/json' -d '{"quantity": 0}'
 ```
 
 Example enriched incident:
@@ -167,7 +245,11 @@ The Bridge **validates the catalog at startup** and refuses to start if a YAML f
 
 ## Tests
 
+Tests run outside Docker, against the code directly:
+
 ```bash
+source .venv/bin/activate
+pip install -r requirements-dev.txt
 pytest -v
 ```
 
