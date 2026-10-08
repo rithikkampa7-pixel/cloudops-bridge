@@ -1,0 +1,36 @@
+{
+  "receiver": "cloudops-bridge",
+  "status": "firing",
+  "alerts": [
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "TicketServiceTargetDown",
+        "environment": "production",
+        "instance": "10.244.0.10:8080",
+        "job": "ticket-service",
+        "namespace": "cloudops-bridge",
+        "pod": "ticket-service-79b4b8b84d-f4qnp",
+        "service": "ticket-api",
+        "severity": "warning"
+      },
+      "annotations": {
+        "description": "Scrapes of 10.244.0.10:8080 (pod ticket-service-79b4b8b84d-f4qnp) have failed for at least 15s. The pod may be hung, restarting, or unreachable. Kubernetes readiness is a separate signal: check the pod as well.",
+        "summary": "Prometheus cannot scrape ticket-service pod ticket-service-79b4b8b84d-f4qnp"
+      },
+      "startsAt": "2026-10-08T20:24:00.416437123Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://prometheus-5dff67d94c-zb2s9:9090/graph?g0.expr=up%7Bjob%3D%22ticket-service%22%7D+%3D%3D+0&g0.tab=1",
+      "fingerprint": "6c1b4e1f2b9d7a3e"
+    }
+  ],
+  "groupLabels": {"alertname": "TicketServiceTargetDown", "environment": "production", "service": "ticket-api"},
+  "commonLabels": {"alertname": "TicketServiceTargetDown", "service": "ticket-api", "environment": "production"},
+  "commonAnnotations": {},
+  "routeLabels": {},
+  "externalURL": "http://alertmanager-754b646ddd-djqpd:9093",
+  "notification_reason": "",
+  "version": "4",
+  "groupKey": "{}/{service=\"ticket-api\"}:{alertname=\"TicketServiceTargetDown\", environment=\"production\", service=\"ticket-api\"}",
+  "truncatedAlerts": 0
+}

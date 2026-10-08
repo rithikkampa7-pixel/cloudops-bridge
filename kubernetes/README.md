@@ -391,6 +391,17 @@ kubectl -n cloudops-bridge rollout restart deployment/bridge
 
 Kubernetes updates mounted ConfigMap files in about a minute, but the bridge reads the catalog only at startup, so the `rollout restart` is what makes it take effect.
 
+After changing Bridge **code** (for example `bridge/alertmanager.py`), rebuild the image, load it into kind, and restart. The tag stays `phase3`, and `imagePullPolicy: Never` means the restart picks up the newly loaded image:
+
+```bash
+docker build -t cloudops-bridge-bridge:phase3 -f bridge/Dockerfile .
+kind load docker-image cloudops-bridge-bridge:phase3 --name cloudops-bridge
+kubectl -n cloudops-bridge rollout restart deployment/bridge
+kubectl -n cloudops-bridge rollout status deployment/bridge
+```
+
+Alertmanager reads its configuration only at startup too. After changing `kubernetes/monitoring/alertmanager/configmap.yaml`, apply it and restart with `kubectl -n monitoring rollout restart deployment/alertmanager`.
+
 ## 11. Cleanup and rebuild from scratch
 
 Remove only the application:

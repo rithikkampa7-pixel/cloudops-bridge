@@ -1,6 +1,6 @@
-# Monitoring and alerting: Prometheus, Grafana, Alertmanager (Phases 4–5)
+# Monitoring, alerting and incident enrichment (Phases 4–6)
 
-Prometheus discovers and scrapes every ticket-service pod and evaluates alert rules. Grafana reads from Prometheus and shows one provisioned dashboard. Alertmanager receives the alerts Prometheus fires, groups them, and tracks them until they resolve. All three run inside the kind cluster, in the `monitoring` namespace. Alerting is covered in [section 10](#10-alerting-phase-5).
+Prometheus discovers and scrapes every ticket-service pod and evaluates alert rules. Grafana reads from Prometheus and shows one provisioned dashboard. Alertmanager receives the alerts Prometheus fires, groups them, and tracks them until they resolve. Alertmanager sends ticket-api alerts to CloudOps Bridge, which enriches them with catalog context. Prometheus, Grafana and Alertmanager run inside the kind cluster, in the `monitoring` namespace. Alerting is covered in [section 10](#10-alerting-phase-5) and enrichment in [section 11](#11-incident-enrichment-alertmanager--cloudops-bridge-phase-6).
 
 > Every code block contains only commands (no `#` comments), so blocks paste cleanly into zsh. Run commands from the repository root, `~/cloudops-bridge`, after the cluster and apps from [../README.md](../README.md) are deployed.
 
@@ -17,14 +17,20 @@ Prometheus discovers and scrapes every ticket-service pod and evaluates alert ru
                         │ firing / resolved alerts (Phase 5)
                         ▼
                  ┌──────────────┐
-                 │ Alertmanager │ ◄── localhost:19093 (UI/API); sends no notifications yet
+                 │ Alertmanager │ ◄── localhost:19093 (UI/API)
                  │ :9093        │
-                 └──────────────┘
+                 └──────┬───────┘
+                        │ webhook, firing + resolved (Phase 6)
+                        ▼
+                 ┌─────────────────┐      service-catalog/*.yaml
+                 │ CloudOps Bridge │ ◄─── runbooks/*.md (ConfigMaps)
+                 │ /webhooks/...   │ ──►  enriched incident (response + logs)
+                 └─────────────────┘
 ```
 
 | Implemented | Still future |
 |---|---|
-| Prometheus, Kubernetes service discovery and scraping, PromQL, Grafana, provisioned Prometheus data source, provisioned CloudOps dashboard (Phase 4). Alert rules `HighErrorRate` and `TicketServiceTargetDown`, Alertmanager with grouping and alert lifecycle, promtool/amtool validation (Phase 5) | **CloudOps Bridge alert integration and automatic enrichment (Phase 6)**, any notification channel (email, Slack, paging), a `HighLatency` alert (no latency metric exists), HPA, Locust, PostgreSQL, Argo CD, GitHub Actions, Terraform, Ansible |
+| Prometheus, Kubernetes service discovery and scraping, PromQL, Grafana, provisioned Prometheus data source, provisioned CloudOps dashboard (Phase 4). Alert rules `HighErrorRate` and `TicketServiceTargetDown`, Alertmanager with grouping and alert lifecycle, promtool/amtool validation (Phase 5). Alertmanager → CloudOps Bridge webhook with catalog enrichment of firing and resolved alerts (Phase 6) | Any notification channel (email, Slack, paging), incident persistence/history, webhook authentication, a `HighLatency` alert (no latency metric exists), HPA, Locust, PostgreSQL, Argo CD, GitHub Actions, Terraform, Ansible |
 
 ## Files
 
@@ -34,7 +40,7 @@ kubernetes/monitoring/
 ├── prometheus/rbac.yaml                   ServiceAccount + namespaced Role (read pods in cloudops-bridge only)
 ├── prometheus/configmap.yaml              prometheus.yml: scrape jobs, discovery, rule files, Alertmanager target
 ├── prometheus/rules-configmap.yaml        alert rules (Phase 5), the single source of truth
-├── alertmanager/configmap.yaml            alertmanager.yml: routing and grouping (Phase 5)
+├── alertmanager/configmap.yaml            alertmanager.yml: grouping; ticket-api → Bridge webhook (Phases 5–6)
 ├── alertmanager/deployment.yaml, service.yaml
 ├── validate-alerting.sh                   promtool + amtool checks and rule unit tests (Phase 5)
 ├── prometheus/deployment.yaml, service.yaml
@@ -379,7 +385,7 @@ Changing `prometheus.yml` needs `kubectl -n monitoring rollout restart deploymen
 
 ## 10. Alerting (Phase 5)
 
-> **CloudOps Bridge alert integration is NOT implemented yet. That's Phase 6.** Alertmanager receives and tracks alerts but sends them nowhere: no email, chat, paging, or Bridge webhook. Nothing enriches alerts automatically yet.
+> Phase 5 built detection and alert delivery to Alertmanager. **Phase 6 (section 11) added the Bridge webhook**: ticket-api alerts are now sent to CloudOps Bridge and enriched. There's still no email, chat or paging.
 
 ### Concepts
 
@@ -410,20 +416,20 @@ Defined in `prometheus/rules-configmap.yaml`, loaded from `/etc/prometheus-rules
 - **HighErrorRate:** production thresholds come from the service's SLO, typically multi-window *error-budget burn-rate* alerts tuned against real baseline error rates.
 - **TicketServiceTargetDown:** `for: 15s` exists only because Kubernetes restarts a hung pod within ~45 seconds here. A production-style `for: 2–5m` would never fire for a pod that heals itself, which is exactly what production wants, since a self-healing blip shouldn't page anyone. The 15s value also has a real false-positive risk (see Observations).
 
-### Label contract (for Phase 6)
+### Label contract (used by the Bridge, section 11)
 
 Every alert carries stable identity that matches `service-catalog/ticket-api.yaml`:
 
 | Label | Value | Source of truth |
 |---|---|---|
-| `alertname` | `HighErrorRate`, `TicketServiceTargetDown` | Catalog `alerts:` keys (see gap below) |
+| `alertname` | `HighErrorRate`, `TicketServiceTargetDown` | Catalog `alerts:` keys (both are defined) |
 | `service` | `ticket-api` | Catalog `service` |
 | `environment` | `production` | One of the catalog's `environments` |
-| `severity` | `critical` / `warning` | `HighErrorRate` matches the catalog's production severity |
+| `severity` | `critical` / `warning` | Matches the catalog's production severity for each alert (a test enforces it) |
 
 `TicketServiceTargetDown` also carries `pod`, `instance`, `namespace` and `job`. Its `summary` and `description` annotations name the failing pod.
 
-**Known gap:** the catalog defines `HighErrorRate` and `HighLatency`, but not `TicketServiceTargetDown`. Adding it (with owner, checks and a runbook) is a Phase 6 decision; the catalog is unchanged in this phase. `HighLatency` has **no rule**, because the app exports no latency histogram or summary. A latency alert would have no real data to evaluate.
+**Gap closed in Phase 6:** `TicketServiceTargetDown` was missing from the catalog in Phase 5. It now has an entry (first responder CloudOps, suggested checks) and its own runbook, `runbooks/ticket-service-target-down.md`. `HighLatency` has **no rule**, because the app exports no latency histogram or summary. A latency alert would have no real data to evaluate.
 
 ### Alertmanager routing
 
@@ -431,13 +437,14 @@ Every alert carries stable identity that matches `service-catalog/ticket-api.yam
 route:   receiver no-notifications, group_by [alertname, service, environment]
          group_wait 10s, group_interval 1m, repeat_interval 4h
 receivers: no-notifications  (no integrations)
+         + Phase 6: child route service="ticket-api" -> cloudops-bridge webhook (section 11)
 ```
 
 - **`group_by`:** pods failing for the same reason, on the same service, become one group, not one notification each.
 - **`group_wait: 10s`** (default 30s): how long a new group waits to collect related alerts before its *first notification*. It does **not** delay the alert appearing in Alertmanager; measured, the alert was visible within ~1 s of Prometheus firing it.
 - **`group_interval: 1m`** (default 5m): the minimum gap between notifications about changes to the same group.
 - **`repeat_interval: 4h`** (the default): how often a still-firing group is re-sent.
-- **`no-notifications`:** a receiver with no integrations is valid configuration. There are no fake URLs. Phase 6 will add the Bridge webhook.
+- **`no-notifications`:** a receiver with no integrations is valid configuration; it remains the default for anything that isn't ticket-api. Phase 6 added the `cloudops-bridge` webhook receiver (section 11).
 
 Prometheus finds Alertmanager through DNS: `alerting.alertmanagers` targets `alertmanager.monitoring.svc:9093`.
 
@@ -568,10 +575,167 @@ The ticket service has **no natural, safe way to return 5xx**. Its only 500 path
 
 - No live HighErrorRate demonstration (see above). No HighLatency rule (no metric).
 - Alertmanager state is in an `emptyDir`, so silences are lost when the pod restarts. There's a single replica with no HA.
-- No notifications are sent anywhere. Bridge integration and enrichment are Phase 6.
+- No email, chat or paging notifications. Alerts go only to the in-cluster Bridge webhook (section 11).
 - The demo `for` values trade realism for observability, as documented above.
 
-## 11. Troubleshooting
+## 11. Incident enrichment: Alertmanager → CloudOps Bridge (Phase 6)
+
+### Who does what
+
+| Component | Responsibility |
+|---|---|
+| **Prometheus** | *Detects* a condition: evaluates rules, decides pending/firing/resolved, attaches stable labels |
+| **Alertmanager** | *Delivers* it: groups, deduplicates, times notifications (`group_wait`, `group_interval`), retries, and POSTs to the webhook |
+| **CloudOps Bridge** | *Explains* it: maps the alert to the service catalog and returns ownership, first responder, dependencies, endpoints, runbook and checks |
+| **Service catalog / runbooks** | The source of truth for that context (`service-catalog/*.yaml`, `runbooks/*.md`), mounted as ConfigMaps |
+
+A **raw alert** says *what* fired: `TicketServiceTargetDown` on pod X. An **enriched incident** adds *what to do about it*: who owns it, who responds first, what it depends on, which runbook to open, and what to check first. **The Bridge doesn't diagnose.** It reports no root cause, impact, deployment correlation, logs or metrics, and uses no AI. Everything comes from the alert's labels and annotations plus the catalog.
+
+### Flow
+
+```
+up{job="ticket-service"} == 0 for 15s ─► Prometheus FIRING ─► Alertmanager (route service="ticket-api")
+   ─► POST http://bridge.cloudops-bridge.svc:8081/webhooks/alertmanager  (send_resolved: true)
+   ─► Bridge: labels alertname/service/environment ─► catalog ─► enriched result + log lines
+```
+
+Alertmanager (namespace `monitoring`) reaches the Bridge by its cluster DNS name. The Service load-balances each POST to one of the two Ready Bridge pods, so **read logs from both pods**. `--tail=-1` matters: with a label selector, `kubectl logs` otherwise shows only the last 10 lines per pod, and probe lines push the webhook lines out:
+
+```bash
+kubectl -n cloudops-bridge logs -l app.kubernetes.io/name=bridge --prefix --tail=-1 --since=10m | grep 'event='
+```
+
+### Routing
+
+```yaml
+route:
+  receiver: no-notifications            # default: everything else goes nowhere
+  routes:
+    - matchers: ['service="ticket-api"']  # explicit: only the onboarded service
+      receiver: cloudops-bridge
+receivers:
+  - name: cloudops-bridge
+    webhook_configs:
+      - url: http://bridge.cloudops-bridge.svc:8081/webhooks/alertmanager
+        send_resolved: true               # webhook default, made explicit
+```
+
+`group_by`, `group_wait: 10s`, `group_interval: 1m` and `repeat_interval: 4h` are unchanged. Other services stay on `no-notifications` until they're deliberately added to the catalog and the route. There are no email, chat or paging integrations.
+
+### Endpoint and payload
+
+`POST /webhooks/alertmanager` accepts Alertmanager's own webhook format, **version `"4"`**, checked against the v0.34.1 source. Other versions get a 422 instead of being misread.
+
+- **Unknown fields are ignored (`extra="ignore"`).** The payload is an external schema that gains fields over time (`notification_reason`, `routeLabels`). Rejecting them would break the integration on an Alertmanager upgrade. The service catalog does the opposite (`extra="forbid"`), because we own it and want typos caught.
+- **Timestamps** (`startsAt`, `endsAt`) are passed through as Alertmanager's strings: nanosecond precision, and Go's zero time `0001-01-01T00:00:00Z` as `endsAt` on firing alerts.
+- **`POST /incidents/enrich` is unchanged.** Both endpoints share one catalog lookup function, so they always return identical context. It now also knows `TicketServiceTargetDown`.
+
+### Per-alert processing and outcomes
+
+One notification can carry several alerts, firing and resolved mixed. **Every alert is processed and reported individually.** Nothing is dropped, and the notification-level `status` isn't treated as each alert's status.
+
+Mapping uses only the stable labels `alertname`, `service` and `environment`. It never uses pod, IP, fingerprint, or summary text.
+
+| Outcome | When | Result |
+|---|---|---|
+| `enriched` | Service exists, environment allowed, alert defined in the catalog | Full `incident`: the same model as `/incidents/enrich` |
+| `unmapped` | Service and environment known, but **this alert isn't in the catalog** | `incident: null`, plus a reason stating the **operational-readiness gap** (no owner response, checks or runbook). Nothing is invented |
+| `rejected` | A required label is missing, the service is unknown, or the environment isn't allowed | `incident: null`, plus the reason |
+
+Every result also carries `status`, `fingerprint`, `starts_at`/`ends_at`, the Prometheus `severity` label, and `source` (the real `pod`, `instance`, `namespace`, summary, description and generator URL).
+
+### Status codes (Alertmanager retries 5xx, never 4xx; verified in its `Retrier.Check`)
+
+| Situation | Response | Why |
+|---|---|---|
+| Valid payload, any mix of outcomes | **200** | `unmapped`/`rejected` are permanent catalog facts. A 4xx would fail the whole batch, including its valid alerts; a 5xx would make Alertmanager retry something retrying can't fix. Each problem is in the body and logged as a WARNING |
+| Malformed JSON, wrong types, unsupported `version` | **422** | Retrying the same bytes can't succeed. Logged as `event=webhook_rejected`, and visible in `alertmanager_notifications_failed_total` |
+| Catalog not loaded | **503** | Temporary, so Alertmanager retries |
+| Unexpected exception | **500** without a stack trace | Retried |
+
+### Logging
+
+These are single-line `key=value` records on stdout. Raw payloads and annotation text are never logged.
+
+```
+event=webhook_received receiver=cloudops-bridge group_status=firing alerts=1 truncated=0
+event=alert_processed status=firing outcome=enriched alertname=TicketServiceTargetDown service=ticket-api environment=production severity=warning pod=... instance=... runbook=ticket-service-target-down.md fingerprint=... reason=-
+event=incident_context fingerprint=... severity=warning first_responder=cloudops application_owner="Ticket Development" cloudops_owner=CloudOps dependencies=postgresql health=/health readiness=/ready runbook=ticket-service-target-down.md checks=6
+```
+
+`incident_context` exists because **Alertmanager discards webhook response bodies**. Without it, the enrichment produced for a real alert would leave no trace. `unmapped`/`rejected` lines are logged at WARNING.
+
+**No persistence.** The Bridge stores nothing. The HTTP response and these log lines are the only record; there's no incident history and no "closing" an incident. A firing event and its resolution share the same `fingerprint`, which is how to correlate them in the logs.
+
+### Trust boundary
+
+The webhook has **no authentication**. The Bridge is ClusterIP-only (no Ingress, no NodePort) on a local, single-tenant cluster with no NetworkPolicy, so **any pod in the cluster could POST forged alerts**. That's acceptable for this demo and **not production-ready**. Production would restrict senders with a NetworkPolicy (only Alertmanager may reach the Bridge), service identity / mTLS, or webhook authentication (`http_config.authorization` with a token from a Secret).
+
+### Demo: a real alert, end to end
+
+> Uses the same controlled freeze as Demo A in section 10. **Nothing is POSTed by hand**: the webhook is Alertmanager's own. Keep the Prometheus and Alertmanager port-forwards running.
+
+Tab 2, Bridge logs from both pods, live:
+
+```bash
+kubectl -n cloudops-bridge logs -f -l app.kubernetes.io/name=bridge --prefix --since=1s | grep -E 'event=|POST /webhooks'
+```
+
+Tab 3, the alert timeline. Pass the pod name printed in Tab 1:
+
+```bash
+python3 kubernetes/tools/alert_watch.py 180 POD_NAME
+```
+
+Tab 1, the same commands as Demo A: pick a pod, then freeze it. Later, check Alertmanager's own delivery counter:
+
+```bash
+POD=$(kubectl -n cloudops-bridge get pods -l app.kubernetes.io/name=ticket-service -o jsonpath='{.items[0].metadata.name}')
+CID=$(kubectl -n cloudops-bridge get pod $POD -o jsonpath='{.status.containerStatuses[0].containerID}' | sed 's|containerd://||')
+HOSTPID=$(docker exec cloudops-bridge-control-plane crictl inspect --output go-template --template '{{.info.pid}}' $CID)
+echo $POD $HOSTPID
+docker exec cloudops-bridge-control-plane kill -STOP $HOSTPID
+```
+
+```bash
+curl -s localhost:19093/metrics | grep -E '^alertmanager_notifications_(total|failed_total)\{.*webhook'
+```
+
+**Observed, three runs** (seconds after the freeze; run 3 on a cluster rebuilt from scratch, using exactly these commands):
+
+| Event | Run 1 | Run 2 | Run 3 |
+|---|---|---|---|
+| `up=0` | +13 | +16 (Kubernetes `0/1` first, at +10) | +16 (Kubernetes `0/1` at +12) |
+| PENDING | +22 | +19 | +25 |
+| FIRING (Prometheus) and active in Alertmanager | +38 | +35 | +41 |
+| Kubernetes restart (`r=1`) | +44 | +41 | +47 |
+| **Bridge receives the firing webhook**, `outcome=enriched` | **+47** | **+43** | **+49** |
+| `up=1` | +53 | +56 | +56 |
+| Resolved in Prometheus and gone from Alertmanager's active list | +53 | +66 | +72 |
+| **Bridge receives the resolved webhook** | **+107** | **+103** | **+109** |
+| Webhook deliveries / failures (Alertmanager counter) | 2 / 0 | 2 / 0 | 2 / 0 |
+
+In all three runs:
+- **The firing webhook arrived ~9 s after Alertmanager first had the alert.** That's `group_wait: 10s`. The alert was still firing, because the restart doesn't clear `up=0` until the next successful scrape.
+- **The resolved webhook arrived exactly 60 s after the firing one** (21:15:40.489 → 21:16:40.486 in run 1), which is `group_interval: 1m`. That's 54 s, 37 s and 37 s after Prometheus had already resolved the alert.
+- The request source was the Alertmanager pod's IP; the firing and resolved events shared one fingerprint; and run 2 logged the full context: `first_responder=cloudops`, owners, `dependencies=postgresql`, endpoints, runbook, and `checks=6`.
+
+**Real batching and a duplicate resolved delivery.** Run 2's resolved webhook carried **2 alerts**: run 2's pod, **and run 1's pod**, which had already been delivered as resolved 4 minutes earlier. Prometheus keeps re-sending a resolved alert to Alertmanager for 15 minutes (`resolvedRetention`, in Prometheus's `rules/alerting.go`). Run 1's alert was therefore still in Alertmanager when run 2 created a group with the same `alertname/service/environment`, and it was flushed again. So:
+- **duplicate resolved deliveries are normal**, and the fingerprint identifies them;
+- **a notification's status is not each alert's status**, which is why the Bridge processes alerts one by one.
+
+**Timing risk.** The firing webhook depends on the alert still firing when `group_wait` expires. In these runs it fired ~9 s after Alertmanager received it, while `up=0` lasted until the first scrape after the restart. If the restarted pod were scraped before `group_wait` expired, Alertmanager would send only a resolved notification. That didn't happen in 3/3 runs, and `group_wait` stays 10 s.
+
+### Limitations
+
+- **No persistence:** no incident history, deduplication or acknowledgement; logs and responses only.
+- **No webhook authentication** (see Trust boundary).
+- **Only `ticket-api` is routed to the Bridge.** Adding a service means adding its catalog file *and* a route.
+- The **catalog is read at startup**: after changing it, regenerate the ConfigMaps and `rollout restart deployment/bridge`. After changing Bridge *code*, rebuild the image, `kind load docker-image` it, and restart.
+- **HighErrorRate has never fired live** (no safe 5xx source); it's checked only with isolated payload tests.
+- **The rollout false positive from Phase 5 would now reach the Bridge** as a `TicketServiceTargetDown` incident. The runbook explains how to recognize it.
+
+## 12. Troubleshooting
 
 | Symptom | Check |
 |---|---|
@@ -582,10 +746,14 @@ The ticket service has **no natural, safe way to return 5xx**. Its only 500 path
 | Grafana pod in `CreateContainerConfigError` | The `grafana-admin` Secret is missing. Run the create command from section 1 |
 | `--rules` shows no rule group | `kubectl -n monitoring get configmap prometheus-rules`, then `kubectl -n monitoring exec deploy/prometheus -- ls /etc/prometheus-rules` and the `promtool check config` command in section 10. Rule changes need `kubectl -n monitoring rollout restart deployment/prometheus` |
 | Alert FIRING in Prometheus but not in Alertmanager | `curl -s localhost:19090/api/v1/alertmanagers` must list one active URL; `python3 kubernetes/tools/promql.py 'prometheus_notifications_errors_total'` should stay 0; `kubectl -n monitoring logs deploy/alertmanager` |
+| Bridge never logs `event=webhook_received` | `kubectl -n monitoring exec deploy/alertmanager -- amtool config routes show --alertmanager.url=http://localhost:9093` must show `{service="ticket-api"} receiver: cloudops-bridge`. Check the counters `curl -s localhost:19093/metrics \| grep notifications_failed_total` (`serverError` = Bridge 5xx, `clientError` = 4xx) and `kubectl -n monitoring logs deploy/alertmanager`. Remember the firing webhook waits `group_wait` (10 s) and the resolved one waits up to `group_interval` (1 min) |
+| Bridge logs `outcome=unmapped` | The alert fired but has no catalog entry: an operational-readiness gap. Add it to `service-catalog/<service>.yaml` (and a runbook), regenerate the ConfigMaps, and restart the Bridge |
+| Bridge logs `event=webhook_rejected` | Alertmanager sent something the Bridge couldn't parse (for example a new payload `version`). It isn't retried |
+| The same resolved alert logged twice | Expected: Prometheus re-sends resolved alerts for 15 min, and Alertmanager can include them in a later notification for the same group. Match by `fingerprint` |
 | Target-down demo went pending → inactive without firing | The pod restarted before the `for` was satisfied (see Demo A). Run it again |
 | port-forward: `address already in use` | Another project uses that port. Pick a different local port, for example `29090:9090` |
 
-## 12. Cleanup
+## 13. Cleanup
 
 Remove only monitoring (the Secret goes with the namespace):
 

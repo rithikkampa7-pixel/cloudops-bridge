@@ -4,18 +4,20 @@ Rule *logic* is unit-tested with promtool (tests/prometheus/, run by
 kubernetes/monitoring/validate-alerting.sh). These tests protect the wiring
 and contracts that promtool cannot see: that Prometheus actually loads the
 mounted rules and reaches the real Alertmanager Service, that alert labels
-match the service catalog (Phase 6 will map alerts with them), and that
-Phase 5 sends nothing anywhere yet.
+match the service catalog (the Bridge maps alerts with them), and that
+Alertmanager sends ticket-api alerts only to the in-cluster Bridge webhook.
 """
 
 import fnmatch
 import re
 from pathlib import Path
+from urllib.parse import urlparse
 
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 MON = ROOT / "kubernetes" / "monitoring"
+K8S = ROOT / "kubernetes"
 CATALOG = yaml.safe_load((ROOT / "service-catalog" / "ticket-api.yaml").read_text())
 
 
@@ -78,27 +80,49 @@ def test_target_down_is_scoped_to_ticket_service():
 
 
 def test_alert_labels_match_the_service_catalog():
-    # Phase 6 maps alerts to the catalog by these labels.
+    # The Bridge maps alerts to the catalog by these labels, so every rule
+    # Prometheus can fire must have a catalog entry with the same severity.
     for name, rule in RULES.items():
         labels, annotations = rule["labels"], rule["annotations"]
         assert labels["service"] == CATALOG["service"], name
         assert labels["environment"] in CATALOG["environments"], name
-        assert labels["severity"] in {"critical", "warning", "info"}, name
         assert annotations.get("summary") and annotations.get("description"), name
-    catalog_severity = CATALOG["alerts"]["HighErrorRate"]["severity"]
-    rule = RULES["HighErrorRate"]["labels"]
-    assert rule["severity"] == catalog_severity[rule["environment"]]
+        assert name in CATALOG["alerts"], f"{name} fires but has no catalog entry"
+        catalog_severity = CATALOG["alerts"][name]["severity"]
+        assert labels["severity"] == catalog_severity[labels["environment"]], name
 
 
-def test_alertmanager_groups_by_identity_and_sends_nothing_yet():
+def test_alertmanager_sends_ticket_api_alerts_only_to_the_bridge():
     route = ALERTMANAGER["route"]
     assert {"alertname", "service", "environment"} <= set(route["group_by"])
     receivers = {r["name"]: r for r in ALERTMANAGER["receivers"]}
-    assert route["receiver"] in receivers
-    # Phase 5 ends at Alertmanager: no webhook (CloudOps Bridge is Phase 6),
-    # email, chat or paging integration of any kind.
-    for receiver in receivers.values():
-        assert set(receiver) == {"name"}, receiver
+
+    # Exactly one child route, with an explicit (not regex) service matcher.
+    assert route["routes"] == [
+        {"matchers": [f'service="{CATALOG["service"]}"'], "receiver": "cloudops-bridge"}
+    ]
+    assert set(receivers[route["receiver"]]) == {"name"}  # default: no integrations
+
+    bridge = receivers["cloudops-bridge"]
+    assert set(bridge) == {"name", "webhook_configs"}  # no email/slack/pagerduty/...
+    assert len(bridge["webhook_configs"]) == 1
+    webhook = bridge["webhook_configs"][0]
+    assert webhook["send_resolved"] is True
+
+    # The URL is the Bridge's in-cluster Service DNS name, port and webhook path.
+    service = yaml.safe_load((K8S / "bridge" / "service.yaml").read_text())
+    url = urlparse(webhook["url"])
+    from bridge.main import WEBHOOK_PATH
+    assert url.scheme == "http"
+    assert url.hostname == f"{service['metadata']['name']}.{service['metadata']['namespace']}.svc"
+    assert url.port == service["spec"]["ports"][0]["port"]
+    assert url.path == WEBHOOK_PATH
+
+    # Nothing in the parsed configuration (comments excluded) is an external
+    # integration or points outside the cluster.
+    text = yaml.safe_dump(ALERTMANAGER).lower()
+    for forbidden in ("slack", "pagerduty", "email", "opsgenie", "msteams", "https://"):
+        assert forbidden not in text, forbidden
 
 
 def test_monitoring_images_are_pinned():

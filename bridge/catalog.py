@@ -6,7 +6,7 @@ from typing import Dict
 
 import yaml
 
-from bridge.models import ServiceEntry
+from bridge.models import EnrichedIncident, ServiceEntry
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CATALOG_DIR = REPO_ROOT / "service-catalog"
@@ -49,3 +49,69 @@ def load_catalog(directory: Path) -> Dict[str, ServiceEntry]:
     if not services:
         raise CatalogError(f"No service catalog files found in {directory}")
     return services
+
+
+class LookupFailure(Exception):
+    """A service/environment/alert that the catalog does not define.
+
+    `kind` says which part failed; `status_code` is what the manual
+    /incidents/enrich API has always returned for it.
+    """
+
+    def __init__(self, kind: str, status_code: int, detail: str):
+        super().__init__(detail)
+        self.kind = kind
+        self.status_code = status_code
+        self.detail = detail
+
+
+def enrich(catalog: Dict[str, ServiceEntry], service: str, environment: str,
+           alert_name: str) -> EnrichedIncident:
+    """Build an enriched incident purely from the catalog.
+
+    Shared by POST /incidents/enrich and the Alertmanager webhook so both
+    always return identical operational context for the same alert.
+    """
+    entry = catalog.get(service)
+    if entry is None:
+        raise LookupFailure("unknown_service", 404,
+                            f"Service '{service}' not found in service catalog")
+
+    if environment not in entry.environments:
+        raise LookupFailure(
+            "unknown_environment", 422,
+            f"Environment '{environment}' is not defined for "
+            f"'{entry.service}'. Known: {entry.environments}",
+        )
+
+    alert = entry.alerts.get(alert_name)
+    if alert is None:
+        raise LookupFailure(
+            "unknown_alert", 422,
+            f"Alert '{alert_name}' is not defined for '{entry.service}'. "
+            f"Known: {sorted(entry.alerts)}",
+        )
+
+    checks = list(alert.suggested_checks)
+    if alert.runbook is None:
+        checks.append(
+            "No runbook exists for this alert: document the resolution "
+            "in runbooks/ afterward"
+        )
+
+    return EnrichedIncident(
+        service=entry.service,
+        environment=environment,
+        alert=alert_name,
+        summary=alert.summary,
+        # Fall back to "warning" if the catalog doesn't list a severity for this environment.
+        severity=alert.severity.get(environment, "warning"),
+        first_responder=alert.first_responder,
+        application_owner=entry.owners.application,
+        cloudops_owner=entry.owners.cloudops,
+        dependencies=entry.dependencies,
+        health_endpoint=entry.endpoints.health,
+        readiness_endpoint=entry.endpoints.readiness,
+        runbook=alert.runbook,
+        suggested_checks=checks,
+    )

@@ -8,9 +8,9 @@ metadata:
     app.kubernetes.io/part-of: cloudops-bridge
 data:
   alertmanager.yml: |
-    # Phase 5: Alertmanager receives, groups and tracks alerts, and exposes
-    # them through its UI/API. It sends no notifications yet: no email, chat,
-    # paging, or CloudOps Bridge webhook.
+    # Alertmanager receives, groups and tracks alerts. ticket-api alerts are
+    # sent to CloudOps Bridge for enrichment (Phase 6); everything else goes to
+    # a receiver with no integrations. No email, chat or paging.
     route:
       receiver: no-notifications
       # One group per alert type per service/environment, so pods failing for
@@ -19,12 +19,27 @@ data:
       # Wait 10s after the first alert of a new group so related alerts can be
       # batched (default 30s; shortened for a local demo).
       group_wait: 10s
-      # Wait 1m before notifying about changes to an existing group (default 5m).
+      # Wait 1m before notifying about changes to an existing group (default
+      # 5m). Resolved notifications are sent on this cycle too.
       group_interval: 1m
       # Re-notify about a still-firing group every 4h (the default).
       repeat_interval: 4h
+      routes:
+        # Only the service the Bridge has a catalog entry for. Other services
+        # stay on the default receiver until they are deliberately onboarded.
+        - matchers: ['service="ticket-api"']
+          receiver: cloudops-bridge
 
     receivers:
       # A receiver with no integrations is valid: alerts are still received,
       # grouped and shown, but nothing is sent anywhere.
       - name: no-notifications
+      # Internal cluster DNS: Service "bridge" in namespace "cloudops-bridge".
+      # No authentication: the Bridge is ClusterIP-only on a trusted local
+      # cluster (see kubernetes/monitoring/README.md, section 10).
+      - name: cloudops-bridge
+        webhook_configs:
+          - url: http://bridge.cloudops-bridge.svc:8081/webhooks/alertmanager
+            # Default for webhooks is already true; explicit because the Bridge
+            # relies on resolved notifications.
+            send_resolved: true

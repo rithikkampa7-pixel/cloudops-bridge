@@ -51,3 +51,19 @@ alerts:
       - Check request volume for a traffic spike (e.g. ticket on-sale event)
       - Check CPU and memory saturation
       - Check dependency (database) response times
+
+  TicketServiceTargetDown:
+    summary: Prometheus cannot scrape a ticket-api pod (hung, restarting, or unreachable).
+    severity:
+      production: warning   # one replica affected; the other keeps serving
+      staging: info
+    # Platform signal first: is the pod hung, restarting, or unreachable?
+    first_responder: cloudops
+    runbook: ticket-service-target-down.md
+    suggested_checks:
+      - Check whether Kubernetes already restarted or replaced the pod (RESTARTS, pod age)
+      - Check the pod's readiness and liveness state and recent events
+      - Read the scrape error on the Prometheus target (timeout vs connection refused)
+      - Read the previous container's logs if the pod restarted
+      - Confirm the other replica is Ready and serving traffic
+      - Check rollout history for a deployment in progress
