@@ -62,12 +62,12 @@ Expected: context `kind-cloudops-bridge`, then `node/cloudops-bridge-control-pla
 
 ## 3. Build and load the images
 
-The images are built from the same Dockerfiles Docker Compose uses and copied straight into the kind node. Nothing is pushed to a registry. The `:phase3` tag is historical (it dates from when Kubernetes support was added) and is kept so the manifests and commands stay consistent; it doesn't mean the image is out of date.
+The images are built from the same Dockerfiles Docker Compose uses and copied straight into the kind node. Nothing is pushed to a registry. The `:phase3` tag is historical (it dates from when Kubernetes support was added); it doesn't mean the image is out of date. The ticket-service build is also tagged `:phase8-v2`, the tag its Deployment uses since the [GitOps deployment](../gitops/README.md); the load test still uses `:phase3`. Both tags are the same image.
 
 ```bash
-docker build -t cloudops-bridge-ticket-service:phase3 -f ticket_service/Dockerfile .
+docker build -t cloudops-bridge-ticket-service:phase3 -t cloudops-bridge-ticket-service:phase8-v2 -f ticket_service/Dockerfile .
 docker build -t cloudops-bridge-bridge:phase3 -f bridge/Dockerfile .
-kind load docker-image cloudops-bridge-ticket-service:phase3 cloudops-bridge-bridge:phase3 --name cloudops-bridge
+kind load docker-image cloudops-bridge-ticket-service:phase3 cloudops-bridge-ticket-service:phase8-v2 cloudops-bridge-bridge:phase3 --name cloudops-bridge
 ```
 
 **Why `imagePullPolicy: Never`:** these images exist only inside the kind node. With `IfNotPresent`, a missing image makes the kubelet try Docker Hub, which fails with a misleading `ErrImagePull`. `Never` fails immediately with `ErrImageNeverPull`, which says exactly what's wrong: the image wasn't loaded. This changes when a registry is introduced.
@@ -357,7 +357,7 @@ kubectl -n cloudops-bridge exec -i deploy/bridge -- python - < kubernetes/tools/
 
 kubectl 1.37 also prints `Warning: ... Rolling back will not update the kubectl.kubernetes.io/last-applied-configuration annotation`. That's expected: `undo` changes the live object outside `kubectl apply`'s bookkeeping, which is one reason to finish with [Restore the declared state](#restore-the-declared-state).
 
-Expected: `successfully rolled out`, image back to `cloudops-bridge-ticket-service:phase3`, and the previous good revision moved to the top of the history with a new number (undo creates a new revision). The availability check should report `0 failed`.
+Expected: `successfully rolled out`, image back to the tag in `deployment.yaml` (`cloudops-bridge-ticket-service:phase8-v2`), and the previous good revision moved to the top of the history with a new number (undo creates a new revision). The availability check should report `0 failed`.
 
 **What this proves:** a broken release never took capacity away from users. Rolling back is a single command, and it is recorded in the history.
 

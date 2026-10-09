@@ -176,9 +176,9 @@ git clone https://github.com/rithikkampa7-pixel/cloudops-bridge.git
 cd cloudops-bridge
 kind create cluster --name cloudops-bridge
 kubectl wait --for=condition=Ready node --all --timeout=120s
-docker build -t cloudops-bridge-ticket-service:phase3 -f ticket_service/Dockerfile .
+docker build -t cloudops-bridge-ticket-service:phase3 -t cloudops-bridge-ticket-service:phase8-v2 -f ticket_service/Dockerfile .
 docker build -t cloudops-bridge-bridge:phase3 -f bridge/Dockerfile .
-kind load docker-image cloudops-bridge-ticket-service:phase3 cloudops-bridge-bridge:phase3 --name cloudops-bridge
+kind load docker-image cloudops-bridge-ticket-service:phase3 cloudops-bridge-ticket-service:phase8-v2 cloudops-bridge-bridge:phase3 --name cloudops-bridge
 kubectl apply -f kubernetes/namespace.yaml -f kubernetes/monitoring/namespace.yaml
 kubectl -n monitoring get secret grafana-admin || kubectl -n monitoring create secret generic grafana-admin --from-literal=admin-password="$(openssl rand -base64 24)"
 kubectl apply -R -f kubernetes/
@@ -192,7 +192,7 @@ kubectl -n monitoring rollout status deployment/kube-state-metrics --timeout=300
 kubectl -n cloudops-bridge wait --for=jsonpath='{.status.readyReplicas}'=2 deployment/ticket-service --timeout=300s
 ```
 
-The Grafana admin password is generated into a Kubernetes Secret at deploy time and never stored in Git (the `get secret` prints `NotFound` first on a fresh cluster). The last `wait` matters because the HPA owns the replica count: a fresh Deployment starts at 1 replica and the HPA raises it to 2. The `:phase3` image tag is a historical name, kept so all manifests and commands stay consistent.
+The Grafana admin password is generated into a Kubernetes Secret at deploy time and never stored in Git (the `get secret` prints `NotFound` first on a fresh cluster). The last `wait` matters because the HPA owns the replica count: a fresh Deployment starts at 1 replica and the HPA raises it to 2. The `:phase3` image tags are historical names. The ticket-service image is also tagged `:phase8-v2`, the tag its Deployment uses since the [GitOps deployment](gitops/README.md); both tags are the same build, and the load test still uses `:phase3`.
 
 Test every endpoint from inside the cluster, then open Grafana (port-forward in its own tab, log in as `admin` with the password copied to your clipboard):
 

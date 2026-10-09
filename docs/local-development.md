@@ -45,7 +45,7 @@ docker compose up --build -d
 docker compose ps
 ```
 
-Every curl request in [Example requests](#example-requests) works unchanged against the containers. The images are tagged `:phase2` under Compose and `:phase3` on kind; both tags are historical names, not versions.
+Every curl request in [Example requests](#example-requests) works unchanged against the containers. The images are tagged `:phase2` under Compose and `:phase3` on kind (ticket-service also `:phase8-v2`, see [gitops/README.md](../gitops/README.md)); these tags are historical names, not versions.
 
 | What | How it's done |
 |---|---|
