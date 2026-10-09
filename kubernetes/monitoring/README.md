@@ -1,6 +1,6 @@
-# Monitoring, alerting and incident enrichment (Phases 4–6)
+# Monitoring, alerting, incident enrichment and scaling metrics
 
-Prometheus discovers and scrapes every ticket-service pod and evaluates alert rules. Grafana reads from Prometheus and shows one provisioned dashboard. Alertmanager receives the alerts Prometheus fires, groups them, and tracks them until they resolve. Alertmanager sends ticket-api alerts to CloudOps Bridge, which enriches them with catalog context. Prometheus, Grafana and Alertmanager run inside the kind cluster, in the `monitoring` namespace. Alerting is covered in [section 10](#10-alerting-phase-5) and enrichment in [section 11](#11-incident-enrichment-alertmanager--cloudops-bridge-phase-6).
+Prometheus discovers and scrapes every ticket-service pod and evaluates alert rules. Grafana reads from Prometheus and shows one provisioned dashboard. Alertmanager receives the alerts Prometheus fires, groups them, and tracks them until they resolve. Alertmanager sends ticket-api alerts to CloudOps Bridge, which enriches them with catalog context. Prometheus, Grafana and Alertmanager run inside the kind cluster, in the `monitoring` namespace. Prometheus also collects the CPU and replica metrics that show the HPA at work. Alerting is covered in [section 10](#10-alerting), enrichment in [section 11](#11-incident-enrichment-alertmanager--cloudops-bridge) and scaling metrics in [section 12](#12-scaling-metrics-and-dashboard).
 
 > Every code block contains only commands (no `#` comments), so blocks paste cleanly into zsh. Run commands from the repository root, `~/cloudops-bridge`, after the cluster and apps from [../README.md](../README.md) are deployed.
 
@@ -14,13 +14,13 @@ Prometheus discovers and scrapes every ticket-service pod and evaluates alert ru
                  │ :9090       │                       │  :3000    │
                  └──────┬──────┘                       └───────────┘
                   localhost:19090                       provisioned data source + dashboard
-                        │ firing / resolved alerts (Phase 5)
+                        │ firing / resolved alerts
                         ▼
                  ┌──────────────┐
                  │ Alertmanager │ ◄── localhost:19093 (UI/API)
                  │ :9093        │
                  └──────┬───────┘
-                        │ webhook, firing + resolved (Phase 6)
+                        │ webhook, firing + resolved
                         ▼
                  ┌─────────────────┐      service-catalog/*.yaml
                  │ CloudOps Bridge │ ◄─── runbooks/*.md (ConfigMaps)
@@ -30,7 +30,7 @@ Prometheus discovers and scrapes every ticket-service pod and evaluates alert ru
 
 | Implemented | Still future |
 |---|---|
-| Prometheus, Kubernetes service discovery and scraping, PromQL, Grafana, provisioned Prometheus data source, provisioned CloudOps dashboard (Phase 4). Alert rules `HighErrorRate` and `TicketServiceTargetDown`, Alertmanager with grouping and alert lifecycle, promtool/amtool validation (Phase 5). Alertmanager → CloudOps Bridge webhook with catalog enrichment of firing and resolved alerts (Phase 6). kubelet CPU metrics, kube-state-metrics, and the Grafana Scaling row for the HPA (Phase 7) | Any notification channel (email, Slack, paging), incident persistence/history, webhook authentication, a `HighLatency` alert (no latency metric exists), PostgreSQL, Argo CD, GitHub Actions, Terraform, Ansible |
+| Prometheus, Kubernetes service discovery and scraping, PromQL, Grafana, provisioned Prometheus data source, provisioned CloudOps dashboard. Alert rules `HighErrorRate` and `TicketServiceTargetDown`, Alertmanager with grouping and alert lifecycle, promtool/amtool validation. Alertmanager → CloudOps Bridge webhook with catalog enrichment of firing and resolved alerts. kubelet CPU metrics, kube-state-metrics, and the Grafana Scaling row for the HPA | Any notification channel (email, Slack, paging), incident persistence/history, webhook authentication, a `HighLatency` alert (no latency metric exists), PostgreSQL, Argo CD, GitHub Actions, Terraform, Ansible |
 
 ## Files
 
@@ -39,11 +39,11 @@ kubernetes/monitoring/
 ├── namespace.yaml                         namespace monitoring
 ├── prometheus/rbac.yaml                   ServiceAccount + namespaced Role (read pods in cloudops-bridge only)
 ├── prometheus/configmap.yaml              prometheus.yml: scrape jobs (incl. kubelet + kube-state-metrics), rule files, Alertmanager target
-├── prometheus/rules-configmap.yaml        alert rules (Phase 5), the single source of truth
-├── alertmanager/configmap.yaml            alertmanager.yml: grouping; ticket-api → Bridge webhook (Phases 5–6)
+├── prometheus/rules-configmap.yaml        alert rules, the single source of truth
+├── alertmanager/configmap.yaml            alertmanager.yml: grouping; ticket-api → Bridge webhook
 ├── alertmanager/deployment.yaml, service.yaml
-├── validate-alerting.sh                   promtool + amtool checks and rule unit tests (Phase 5)
-├── kube-state-metrics/                    pinned v2.20.0, namespace-scoped, read-only Role (Phase 7)
+├── validate-alerting.sh                   promtool + amtool checks and rule unit tests
+├── kube-state-metrics/                    pinned v2.20.0, namespace-scoped, read-only Role
 ├── prometheus/deployment.yaml, service.yaml
 ├── grafana/datasource-configmap.yaml      provisions the Prometheus data source
 ├── grafana/dashboard-provider-configmap.yaml
@@ -52,13 +52,13 @@ kubernetes/monitoring/
 dashboards/ticket-service-overview.json    dashboard source of truth (outside kubernetes/: apply -R would treat .json as a manifest)
 kubernetes/tools/generate_traffic.py       deterministic traffic, run in-cluster
 kubernetes/tools/promql.py                 compact PromQL / target / rule queries from your Mac
-kubernetes/tools/alert_watch.py            timeline of up, pod state, Prometheus and Alertmanager alerts (Phase 5)
-tests/prometheus/ticket-service-alerts.test.yml   promtool unit tests for the rules (Phase 5)
+kubernetes/tools/alert_watch.py            timeline of up, pod state, Prometheus and Alertmanager alerts
+tests/prometheus/ticket-service-alerts.test.yml   promtool unit tests for the rules
 ```
 
 ## Design decisions
 
-**Plain manifests, not Helm.** Helm isn't installed. The community `prometheus` chart enables Alertmanager, node-exporter, kube-state-metrics and Pushgateway by default, and `kube-prometheus-stack` adds the Prometheus Operator and its custom resources. This phase needs one Prometheus and one Grafana. Ten short manifests are easier to read and explain, and they match Phase 3 (no Helm or Kustomize). In production I'd use the Helm chart or the Operator for upgrades and sane defaults.
+**Plain manifests, not Helm.** Helm isn't installed. The community `prometheus` chart enables Alertmanager, node-exporter, kube-state-metrics and Pushgateway by default, and `kube-prometheus-stack` adds the Prometheus Operator and its custom resources. The stack needs one each of Prometheus, Grafana, Alertmanager and kube-state-metrics, without the Operator. A small set of short manifests is easier to read and explain, and it matches the application manifests (no Helm or Kustomize). In production I'd use the Helm chart or the Operator for upgrades and sane defaults.
 
 **Pinned images:** `prom/prometheus:v3.14.0` and `grafana/grafana:13.2.2`. The kind node pulls them from Docker Hub on first deploy, so it needs internet access once.
 
@@ -216,7 +216,7 @@ python3 kubernetes/tools/promql.py 'tickets_available{job="ticket-service"}'
 python3 kubernetes/tools/promql.py 'tickets_sold_total{job="ticket-service"}'
 ```
 
-Each pod's `tickets_available` equals 5000 minus *its own* `tickets_sold_total`. For example, one pod sold 58 and shows 4942, while the other sold 62 and shows 4938. **There's no shared inventory.** Each replica decrements its own in-memory counter, depending on which pod the Service routed each purchase to. The dashboard therefore shows one line per pod and never sums them. PostgreSQL (future phase) fixes this.
+Each pod's `tickets_available` equals 5000 minus *its own* `tickets_sold_total`. For example, one pod sold 58 and shows 4942, while the other sold 62 and shows 4938. **There's no shared inventory.** Each replica decrements its own in-memory counter, depending on which pod the Service routed each purchase to. The dashboard therefore shows one line per pod and never sums them. Shared state in PostgreSQL (future work) would fix this.
 
 Request rate during traffic (run it while the generator is still sending):
 
@@ -289,7 +289,7 @@ kubectl -n cloudops-bridge exec -i deploy/bridge -- python - < kubernetes/tools/
 
 ### Test B: an unhealthy target shows up=0
 
-This freezes one ticket-service process with `SIGSTOP` from the kind node (the Phase 3 liveness technique; see [../README.md](../README.md#demo-a-liveness-probe-restarts-a-hung-process) for why it must come from the node).
+This freezes one ticket-service process with `SIGSTOP` from the kind node (the liveness-demo technique; see [../README.md](../README.md#demo-a-liveness-probe-restarts-a-hung-process) for why it must come from the node).
 
 ```bash
 POD=$(kubectl -n cloudops-bridge get pods -l app.kubernetes.io/name=ticket-service -o jsonpath='{.items[0].metadata.name}')
@@ -332,7 +332,7 @@ kubectl -n cloudops-bridge exec -i deploy/bridge -- python - < kubernetes/tools/
 | Effect | Removes the pod from Service routing | Records `up=0`. Only observation; changes nothing |
 | Uses the Service? | It *drives* the Service endpoints | No: scrapes the pod IP directly, ready or not |
 
-So a NotReady pod is still scraped, and a just-recovered pod can be Ready while `up` is still 0 until the next scrape. In a later phase, alert rules on `up == 0` will turn this signal into an alert. That's why Prometheus must observe pods independently of the Service.
+So a NotReady pod is still scraped, and a just-recovered pod can be Ready while `up` is still 0 until the next scrape. The `TicketServiceTargetDown` rule (section 10) turns this signal into an alert. That's why Prometheus must observe pods independently of the Service.
 
 ## 7. Resources
 
@@ -340,7 +340,7 @@ So a NotReady pod is still scraped, and a just-recovered pod can be Ready while 
 kubectl top pods -n monitoring
 ```
 
-kind doesn't include metrics-server, so this prints `error: Metrics API not available`. I didn't install metrics-server just for this phase, because the HPA phase will need it and install it properly. Meanwhile, read each container's memory straight from its cgroup:
+kind doesn't include metrics-server; this project installs it for the HPA ([../README.md, section 11](../README.md#11-autoscaling-hpa)), so `kubectl top` works. To cross-check, read a container's memory straight from its cgroup, or ask Prometheus for its own:
 
 ```bash
 kubectl -n monitoring exec deploy/prometheus -- cat /sys/fs/cgroup/memory.current
@@ -384,9 +384,9 @@ kubectl -n monitoring rollout restart deployment/grafana
 
 Changing `prometheus.yml` needs `kubectl -n monitoring rollout restart deployment/prometheus`, which also clears its history.
 
-## 10. Alerting (Phase 5)
+## 10. Alerting
 
-> Phase 5 built detection and alert delivery to Alertmanager. **Phase 6 (section 11) added the Bridge webhook**: ticket-api alerts are now sent to CloudOps Bridge and enriched. There's still no email, chat or paging.
+> This section covers detection and delivery to Alertmanager. **Section 11 covers the Bridge webhook**: ticket-api alerts are sent to CloudOps Bridge and enriched. There's no email, chat or paging integration.
 
 ### Concepts
 
@@ -430,7 +430,7 @@ Every alert carries stable identity that matches `service-catalog/ticket-api.yam
 
 `TicketServiceTargetDown` also carries `pod`, `instance`, `namespace` and `job`. Its `summary` and `description` annotations name the failing pod.
 
-**Gap closed in Phase 6:** `TicketServiceTargetDown` was missing from the catalog in Phase 5. It now has an entry (first responder CloudOps, suggested checks) and its own runbook, `runbooks/ticket-service-target-down.md`. `HighLatency` has **no rule**, because the app exports no latency histogram or summary. A latency alert would have no real data to evaluate.
+**Catalog coverage:** `TicketServiceTargetDown` was initially missing from the catalog. It now has an entry (first responder CloudOps, suggested checks) and its own runbook, `runbooks/ticket-service-target-down.md`. `HighLatency` has **no rule**, because the app exports no latency histogram or summary. A latency alert would have no real data to evaluate.
 
 ### Alertmanager routing
 
@@ -438,14 +438,14 @@ Every alert carries stable identity that matches `service-catalog/ticket-api.yam
 route:   receiver no-notifications, group_by [alertname, service, environment]
          group_wait 10s, group_interval 1m, repeat_interval 4h
 receivers: no-notifications  (no integrations)
-         + Phase 6: child route service="ticket-api" -> cloudops-bridge webhook (section 11)
+         + child route service="ticket-api" -> cloudops-bridge webhook (section 11)
 ```
 
 - **`group_by`:** pods failing for the same reason, on the same service, become one group, not one notification each.
 - **`group_wait: 10s`** (default 30s): how long a new group waits to collect related alerts before its *first notification*. It does **not** delay the alert appearing in Alertmanager; measured, the alert was visible within ~1 s of Prometheus firing it.
 - **`group_interval: 1m`** (default 5m): the minimum gap between notifications about changes to the same group.
 - **`repeat_interval: 4h`** (the default): how often a still-firing group is re-sent.
-- **`no-notifications`:** a receiver with no integrations is valid configuration; it remains the default for anything that isn't ticket-api. Phase 6 added the `cloudops-bridge` webhook receiver (section 11).
+- **`no-notifications`:** a receiver with no integrations is valid configuration; it remains the default for anything that isn't ticket-api. ticket-api alerts go to the `cloudops-bridge` webhook receiver (section 11).
 
 Prometheus finds Alertmanager through DNS: `alerting.alertmanagers` targets `alertmanager.monitoring.svc:9093`.
 
@@ -500,7 +500,7 @@ Expected baseline:
 
 ### Demo A: TicketServiceTargetDown, end to end
 
-> Deliberately freezes one ticket-service process. It's the same safe technique as Phase 3 Demo A, and Kubernetes recovers on its own.
+> Deliberately freezes one ticket-service process. It's the same safe technique as Demo A in [../README.md](../README.md#demo-a-liveness-probe-restarts-a-hung-process), and Kubernetes recovers on its own.
 
 With the Prometheus and Alertmanager port-forwards running:
 
@@ -566,11 +566,11 @@ The ticket service has **no natural, safe way to return 5xx**. Its only 500 path
 
 ### Observations from testing
 
-- **Default rule evaluation is 1 minute.** The Phase 4 config didn't set `evaluation_interval`, so it's now explicit (15 s).
+- **Default rule evaluation is 1 minute.** The original monitoring config didn't set `evaluation_interval`, so it's now explicit (15 s).
 - **Alertmanager visibility vs notification.** Alerts appear in Alertmanager about 1 s after firing; `group_wait` only delays notifications.
 - **`endsAt`.** Prometheus sends firing alerts with `endsAt` = now + 4 minutes and refreshes it on every evaluation. If Prometheus stopped, Alertmanager would auto-resolve after 4 minutes. On recovery, Prometheus sends the resolution explicitly, and the alert left Alertmanager's active list immediately.
 - **Readiness vs scrape health** differed in timing again: in run 1 Kubernetes went NotReady 6 s before `up=0`; in run 2 they happened together.
-- **False positive during a rolling update (observed once, not reproduced).** In the first Phase 3 regression rollout, `TicketServiceTargetDown` fired for an old, terminating pod. That pod stayed in the Kubernetes API, and so in Prometheus discovery, for ~40 s after deletion, while its server had already stopped accepting connections. That gave `up=0` long enough for the 15 s `for`. Four repeat attempts showed normal termination: old pods left discovery 6–12 s after deletion with no alert. These were two rollouts under traffic, one without, and one right after a freeze-and-restart. The root cause of that one slow termination wasn't identified. The lesson stands: a 15 s `for` is short enough to page on a slow pod shutdown, and a production `for` of several minutes absorbs it. Dropping NotReady or terminating pods from discovery would hide this alert, but it would also hide the frozen-pod failure the alert exists to catch.
+- **False positive during a rolling update (observed once, not reproduced).** In one rolling-update regression test, `TicketServiceTargetDown` fired for an old, terminating pod. That pod stayed in the Kubernetes API, and so in Prometheus discovery, for ~40 s after deletion, while its server had already stopped accepting connections. That gave `up=0` long enough for the 15 s `for`. Four repeat attempts showed normal termination: old pods left discovery 6–12 s after deletion with no alert. These were two rollouts under traffic, one without, and one right after a freeze-and-restart. The root cause of that one slow termination wasn't identified. The lesson stands: a 15 s `for` is short enough to page on a slow pod shutdown, and a production `for` of several minutes absorbs it. Dropping NotReady or terminating pods from discovery would hide this alert, but it would also hide the frozen-pod failure the alert exists to catch.
 
 ### Limitations
 
@@ -579,7 +579,7 @@ The ticket service has **no natural, safe way to return 5xx**. Its only 500 path
 - No email, chat or paging notifications. Alerts go only to the in-cluster Bridge webhook (section 11).
 - The demo `for` values trade realism for observability, as documented above.
 
-## 11. Incident enrichment: Alertmanager → CloudOps Bridge (Phase 6)
+## 11. Incident enrichment: Alertmanager → CloudOps Bridge
 
 ### Who does what
 
@@ -734,11 +734,11 @@ In all three runs:
 - **Only `ticket-api` is routed to the Bridge.** Adding a service means adding its catalog file *and* a route.
 - The **catalog is read at startup**: after changing it, regenerate the ConfigMaps and `rollout restart deployment/bridge`. After changing Bridge *code*, rebuild the image, `kind load docker-image` it, and restart.
 - **HighErrorRate has never fired live** (no safe 5xx source); it's checked only with isolated payload tests.
-- **The rollout false positive from Phase 5 would now reach the Bridge** as a `TicketServiceTargetDown` incident. The runbook explains how to recognize it.
+- **The rollout false positive (section 10) would now reach the Bridge** as a `TicketServiceTargetDown` incident. The runbook explains how to recognize it.
 
-## 12. Scaling metrics and dashboard (Phase 7)
+## 12. Scaling metrics and dashboard
 
-The HPA itself reads CPU from **metrics-server** (the `metrics.k8s.io` API; see [../README.md, section 11](../README.md#11-autoscaling-hpa-phase-7)). Prometheus and Grafana need their own copy of the same story, from two new scrape jobs:
+The HPA itself reads CPU from **metrics-server** (the `metrics.k8s.io` API; see [../README.md, section 11](../README.md#11-autoscaling-hpa)). Prometheus and Grafana need their own copy of the same story, from two new scrape jobs:
 
 | Job | Source | What it provides | Verified series |
 |---|---|---|---|
@@ -770,6 +770,10 @@ Three panels were added below the existing nine, which are unchanged. Every valu
 | Replicas: HPA desired vs current vs available | `kube_horizontalpodautoscaler_status_desired_replicas`, `..._current_replicas`, `kube_deployment_status_replicas_available`, plus `spec_min`/`spec_max` (dashed) | What the autoscaler wants versus what is Ready and serving. The gap is pods still starting |
 | CPU per pod (% of CPU request) | `sum by (pod) (rate(container_cpu_usage_seconds_total{container="ticket-service"}[$__rate_interval])) / on (pod) sum by (pod) (kube_pod_container_resource_requests{resource="cpu"})`, plus the HPA target / 100 (dashed) | The ratio the HPA uses, one line per pod. It can far exceed 100%: usage is capped by the 500m limit, which is 1000% of the 50m request |
 | HPA CPU utilization: current vs target | `kube_horizontalpodautoscaler_status_target_metric{metric_target_type="utilization"}` vs `..._spec_target_metric` | The HPA's own number |
+
+The full dashboard during the measured on-sale spike (22:44–23:10 UTC; the row title still carries its original name):
+
+![The full Grafana dashboard during the measured on-sale spike](../../docs/images/grafana-full-dashboard.png)
 
 **The two CPU views differ slightly by design.** The per-pod panel is Prometheus's `rate()` over the panel's interval (at least 1 minute). The HPA uses metrics-server's ~15 s window, averaged over Ready pods only. At idle they read, for example, 13–15% per pod versus 17% for the HPA. Under steady load they converge.
 

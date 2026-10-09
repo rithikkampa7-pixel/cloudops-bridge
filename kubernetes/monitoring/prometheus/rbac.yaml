@@ -1,6 +1,6 @@
 # Prometheus runs in "monitoring". Pod discovery for ticket-service needs only
-# a namespaced Role in "cloudops-bridge". Phase 7 adds the project's only
-# cluster-scoped permission: nodes are not namespaced, so reading kubelet
+# a namespaced Role in "cloudops-bridge". The project's only cluster-scoped
+# permission is for the HPA's scaling metrics: nodes are not namespaced, so reading kubelet
 # resource metrics requires a ClusterRole - restricted to listing nodes and
 # reading node metrics. Deliberately NOT nodes/proxy (which would also reach
 # the kubelet's exec/logs API).

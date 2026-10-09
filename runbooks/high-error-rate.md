@@ -85,11 +85,14 @@ kubectl -n cloudops-bridge rollout history deployment/ticket-service
 kubectl -n cloudops-bridge delete pod POD_NAME
 ```
 
-- **Overloaded:** scale out manually (autoscaling arrives in a later phase). Afterward, scale back or re-apply the manifests, because the manifests declare 2 replicas:
+- **Overloaded:** the HorizontalPodAutoscaler already adds replicas on CPU (2–6 replicas, 70% of the CPU request). Check whether it is scaling, and whether it has reached its maximum:
 
 ```bash
-kubectl -n cloudops-bridge scale deployment/ticket-service --replicas=3
+kubectl -n cloudops-bridge get hpa ticket-service
+kubectl -n cloudops-bridge describe hpa ticket-service
 ```
+
+Don't `kubectl scale` the Deployment: the HPA owns the replica count and overrides a manual change on its next decisions (a scale-down after its 300 s stabilization window). If the HPA is at 6 replicas and CPU is still above target, raising `maxReplicas` in `kubernetes/ticket-service/hpa.yaml` is a reviewed configuration change. More replicas won't fix 5xx caused by a bug or a failing dependency.
 
 ## Rollback
 

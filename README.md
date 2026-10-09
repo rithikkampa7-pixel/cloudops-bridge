@@ -1,207 +1,155 @@
 # CloudOps Bridge
 
-**Proactive Incident Context & Operational Readiness Platform**
+**Operational context for on-call engineers, on a Kubernetes platform that monitors, alerts and autoscales a fictional ticketing service.**
 
-CloudOps Bridge takes a bare alert like *"HighErrorRate on ticket-api in production"* and turns it into an **enriched incident**. The incident says who owns the service, what it depends on, how severe the alert is, which runbook to open, and what to check first.
+A bare alert such as *"TicketServiceTargetDown on ticket-api in production"* tells an on-call engineer very little. CloudOps Bridge turns it into an **enriched incident**: who owns the service, who responds first, what it depends on, which runbook to open and what to check first. Around it, a local Kubernetes platform runs the ticketing workload with health probes, Prometheus monitoring, Alertmanager alerting and CPU-based autoscaling.
 
-> This is a fictional demonstration project. All services, teams, and data are made up.
+> Fictional demonstration project. All services, teams and data are made up. Everything runs locally on a single-node [kind](https://kind.sigs.k8s.io/) cluster; no cloud account is needed.
+
+![Grafana: replicas scaling from 2 to 6 and back to 2, per-pod CPU against the 70% HPA target, and HPA utilization during a 200 req/s spike](docs/images/grafana-autoscaling.png)
+
+*Grafana during the measured on-sale spike: the HPA scaled ticket-service from 2 to 6 replicas (its configured maximum) and back to 2. Real data from the acceptance run, 22:44–23:10 UTC.*
 
 ## The problem
 
-On-call engineers often get paged with very little context. They lose the first minutes of an incident trying to answer:
+On-call engineers lose the first minutes of an incident answering the same questions: which service, which environment, who owns it, what it depends on, where the runbook is, what to check first. CloudOps Bridge answers them from a **service catalog**, one YAML file per service that the Development and CloudOps teams agree on as their operational handoff. The knowledge lives in version control instead of in someone's head.
 
-- What service is failing, and in which environment?
-- Who owns it: Development or CloudOps?
-- What does it depend on?
-- Is there a runbook? Where is it?
-- What should I check first?
+## Key capabilities
 
-CloudOps Bridge answers these from a **service catalog**: one YAML file per service that the Development and CloudOps teams agree on as their operational handoff. The knowledge lives in version control instead of in someone's head.
+- **Incident enrichment.** Alertmanager sends real firing and resolved alerts to the Bridge's webhook. The Bridge maps the alert's labels (`alertname`, `service`, `environment`) to owners, first responder, dependencies, endpoints, runbook and suggested checks from `service-catalog/` and `runbooks/`. Unknown alerts are reported as `unmapped`; no runbook is invented.
+- **Monitoring.** Prometheus discovers every ticket-service pod through the Kubernetes API and scrapes it directly. Grafana shows traffic, status codes, errors, per-pod inventory and scaling, provisioned from Git.
+- **Alerting.** `TicketServiceTargetDown` and `HighErrorRate` rules, validated with `promtool` and `amtool`, with rule unit tests.
+- **Autoscaling.** A HorizontalPodAutoscaler keeps ticket-service between 2 and 6 replicas at 70% of its CPU request, driven by real ticket traffic. No artificial CPU-burning endpoint exists.
+- **Kubernetes operations.** Liveness and readiness probes, requests and limits, zero-drop rolling updates, rollback, and hardened, non-root containers.
 
-## Current status: Phase 7 complete
+## Architecture
 
-| Component | Status |
+```mermaid
+flowchart LR
+    LG["Load generator Job<br/>20 → 200 → 20 req/s"] -->|HTTP| TS
+
+    subgraph app["namespace cloudops-bridge"]
+        TS["Ticket Service<br/>FastAPI, 2–6 pods"]
+        BR["CloudOps Bridge<br/>FastAPI, 2 pods"]
+        CAT[("Service catalog<br/>and runbooks")]
+    end
+
+    MS["metrics-server"] -->|pod CPU| HPA["HorizontalPodAutoscaler<br/>2–6 replicas at 70% CPU"]
+    HPA -->|scales| TS
+
+    subgraph mon["namespace monitoring"]
+        P["Prometheus"]
+        G["Grafana"]
+        AM["Alertmanager"]
+        KSM["kube-state-metrics"]
+    end
+
+    TS -->|/metrics| P
+    KL["kubelet<br/>container CPU"] --> P
+    KSM -->|replicas, HPA status| P
+    P -->|PromQL| G
+    P -->|firing / resolved alerts| AM
+    AM -->|webhook| BR
+    CAT --> BR
+    BR --> INC["Enriched incident<br/>owners, runbook, checks"]
+```
+
+**Responsibilities:** Prometheus *detects*, Alertmanager *delivers*, the Bridge *explains*. The Bridge doesn't diagnose root causes or remediate anything.
+
+## Results: autoscaling under a ticket on-sale spike
+
+In a local single-node kind experiment, a 200 req/s ticket-traffic spike drove HPA scaling from 2 to 6 pods; all 60,000 spike requests completed successfully in that run. The traffic was real `GET /tickets` browsing plus 5% single-ticket purchases from an in-cluster load generator. The cluster was freshly built using only the documented commands.
+
+| Time after spike start | Event |
 |---|---|
-| Demo Ticket Service (FastAPI) | ✅ Implemented |
-| CloudOps Bridge enrichment API (FastAPI) | ✅ Implemented |
-| YAML service catalog | ✅ Implemented |
-| Markdown runbook (`HighErrorRate`) | ✅ Implemented |
-| `/metrics` in Prometheus text format | ✅ Implemented |
-| Automated tests (pytest) | ✅ Implemented |
-| **Docker images + Docker Compose** (non-root, health checks, read-only config mounts) | ✅ Implemented (Phase 2) |
-| **Kubernetes on kind**: Deployments, ClusterIP Services, ConfigMaps, liveness/readiness probes, requests/limits, hardened securityContext, rolling update and rollback | ✅ Implemented (Phase 3) |
-| **HPA autoscaling** on CPU (2–6 replicas, 70% of request), pinned metrics-server, kube-state-metrics, kubelet CPU metrics, Grafana Scaling row | ✅ Implemented (Phase 7) |
-| **Prometheus** with Kubernetes pod discovery, PromQL, **Grafana** with provisioned data source and *CloudOps Bridge - Ticket Service Overview* dashboard | ✅ Implemented (Phase 4) |
-| **Prometheus alert rules** (`HighErrorRate` on 5xx, `TicketServiceTargetDown` on `up`) and **Alertmanager** (grouping, alert lifecycle, no notifications yet), validated with promtool/amtool | ✅ Implemented (Phase 5) |
-| **Alertmanager → CloudOps Bridge webhook** (`POST /webhooks/alertmanager`): real firing and resolved alerts enriched from the service catalog, `TicketServiceTargetDown` catalog entry and runbook | ✅ Implemented (Phase 6) |
-| Incident persistence/history, webhook authentication, root-cause analysis, automated remediation | 🔜 Not implemented (by design in Phase 6) |
-| `HighLatency` alert (the app exports no latency metric yet); live `HighErrorRate` demo (no safe way to produce 5xx without an approved app change) | 🔜 Not possible yet |
-| PostgreSQL, deployment tracking, incident timeline | 🔜 Future work |
-| Ticket on-sale load test: an in-cluster standard-library Job, open-loop with bounded concurrency (Locust wasn't needed) | ✅ Implemented (Phase 7) |
-| Argo CD, GitHub Actions, Terraform, Ansible | 🔜 Future work |
-| Slack integration, dashboard, incident reports | 🔜 Future work |
+| +24 s | HPA scaled **2 → 4** (CPU 111% of request vs 70% target) |
+| +39 s | HPA scaled **4 → 6**, the configured maximum (CPU 247%) |
+| +51 s | **All six pods Ready** |
+| after the spike | Scale-down after the 300 s stabilization window: **6 → 4 → 3 → 2** |
 
-## Architecture (Phases 1–7)
+| Stage | Configured | Achieved | Requests | Failed |
+|---|---|---|---|---|
+| Normal | 20 req/s for 3 min | 20.0 req/s | 3,600 | 0 |
+| Spike | 200 req/s for 5 min | 200.0 req/s | 60,000 | 0 |
+| Recovery | 20 req/s for 8 min | 20.0 req/s | 9,600 | 0 |
+
+- An **independent availability checker** ran separately for the whole event (35 min, including every scale-down) and measured **10,197 successful checks and 0 failures**.
+- **Six replicas was the configured maximum, and CPU remained above the 70% target during the spike.** More capacity would have been needed to reach the target.
+- This is one run on one laptop node. It shows how Kubernetes reacts to a spike; it is **not** a benchmark or a production capacity result.
+
+![Grafana: request rate up to 200 req/s, status codes 200 and 201 only, 4xx and 5xx flat at zero, tickets sold per minute](docs/images/grafana-traffic-errors.png)
+
+*Same window: request rate, responses by status code (only 200 and 201), and 4xx/5xx errors at zero throughout.*
+
+Full method, timeline, per-stage numbers and findings: [kubernetes/README.md, section 11](kubernetes/README.md#11-autoscaling-hpa).
+
+## Results: incident enrichment
+
+When Prometheus detects an unavailable ticket-service target, Alertmanager sends a real webhook to CloudOps Bridge, which maps stable alert labels to operational context from the service catalog and runbooks.
+
+Verified live three times, once on a freshly rebuilt cluster, by freezing one ticket-service process:
+
+- Prometheus fired `TicketServiceTargetDown`, and Alertmanager's own webhook reached the Bridge about 9 s after Alertmanager received the alert (its `group_wait`). The Bridge logged `outcome=enriched` with the full context.
+- After Kubernetes restarted the pod, the **resolved** webhook arrived 60 s after the firing one (`group_interval`), with the same alert fingerprint.
+- Alertmanager recorded 0 failed deliveries.
+
+### Example enriched incident (real values from the rebuilt-cluster run)
+
+| Field | Value |
+|---|---|
+| Alert | `TicketServiceTargetDown`, status `firing`, severity `warning` |
+| Service / environment | `ticket-api` / `production` |
+| Affected | pod `ticket-service-79b4b8b84d-5x6wk`, instance `10.244.0.10:8080` |
+| First responder | `cloudops` |
+| Application owner | Ticket Development |
+| CloudOps owner | CloudOps |
+| Dependency | `postgresql` (declared in the catalog; not deployed in this project) |
+| Health / readiness | `/health`, `/ready` |
+| Runbook | [`ticket-service-target-down.md`](runbooks/ticket-service-target-down.md) |
+| Fingerprint | `c850a769b919ceef` |
+
+Suggested checks, from the catalog:
+
+1. Check whether Kubernetes already restarted or replaced the pod (RESTARTS, pod age)
+2. Check the pod's readiness and liveness state and recent events
+3. Read the scrape error on the Prometheus target (timeout vs connection refused)
+4. Read the previous container's logs if the pod restarted
+5. Confirm the other replica is Ready and serving traffic
+6. Check rollout history for a deployment in progress
+
+<details>
+<summary>The Bridge's log lines for this incident</summary>
 
 ```
-                   ┌──────────────┐
-                   │Ticket Service│  :8080  /tickets /tickets/purchase /health /ready /metrics
-                   └──────┬───────┘
-                          │ metrics (scraped every 15s, each pod)
-                          ▼
-                   ┌──────────────┐  PromQL   ┌─────────┐
-                   │  Prometheus  │ ────────► │ Grafana │  dashboard (visualization)
-                   └──────┬───────┘           └─────────┘
-                          │ firing/resolved (rules: TicketServiceTargetDown, HighErrorRate)
-                          ▼
-                   ┌──────────────┐
-                   │ Alertmanager │  groups, times, retries
-                   └──────┬───────┘
-                          │ webhook  POST /webhooks/alertmanager  (service="ticket-api")
-                          ▼
-                  ┌────────────────┐
-                  │CloudOps Bridge │  :8081  also: POST /incidents/enrich (manual)
-                  └───────┬────────┘
-                          │
-                 ┌────────┴────────┐
-                 ▼                 ▼
-          Service Catalog       Runbooks        → enriched incident: owners, first responder,
-          (service-catalog/)    (runbooks/)       dependencies, endpoints, runbook, checks
+2026-10-08 21:34:55,502 INFO bridge event=webhook_received receiver=cloudops-bridge group_status=firing alerts=1 truncated=0
+2026-10-08 21:34:55,506 INFO bridge event=alert_processed status=firing outcome=enriched alertname=TicketServiceTargetDown service=ticket-api environment=production severity=warning pod=ticket-service-79b4b8b84d-5x6wk instance=10.244.0.10:8080 runbook=ticket-service-target-down.md fingerprint=c850a769b919ceef reason=-
+2026-10-08 21:34:55,506 INFO bridge event=incident_context fingerprint=c850a769b919ceef severity=warning first_responder=cloudops application_owner="Ticket Development" cloudops_owner=CloudOps dependencies=postgresql health=/health readiness=/ready runbook=ticket-service-target-down.md checks=6
+2026-10-08 21:35:55,507 INFO bridge event=webhook_received receiver=cloudops-bridge group_status=resolved alerts=1 truncated=0
+2026-10-08 21:35:55,508 INFO bridge event=alert_processed status=resolved outcome=enriched alertname=TicketServiceTargetDown service=ticket-api environment=production severity=warning pod=ticket-service-79b4b8b84d-5x6wk instance=10.244.0.10:8080 runbook=ticket-service-target-down.md fingerprint=c850a769b919ceef reason=-
 ```
 
-On Kubernetes (Phases 3–6), each application runs as a 2-replica Deployment behind a ClusterIP Service. The catalog and runbooks are mounted from ConfigMaps, and monitoring runs in the `monitoring` namespace. Under Docker Compose (Phase 2), only the two applications run; you can call either API with curl, including the webhook with a sample payload.
+</details>
 
-Since Phase 7, a **HorizontalPodAutoscaler** scales ticket-service between 2 and 6 replicas on CPU, using metrics-server. Prometheus also scrapes kubelet CPU and kube-state-metrics, so scaling is visible in Grafana.
+Full routing, payload handling, outcomes and the end-to-end procedure: [kubernetes/monitoring/README.md, section 11](kubernetes/monitoring/README.md#11-incident-enrichment-alertmanager--cloudops-bridge).
 
-**Responsibilities:** Prometheus *detects*, Alertmanager *delivers*, the Bridge *explains*: who owns it, who responds first, what it depends on, what to check, which runbook. The Bridge doesn't diagnose root causes or remediate.
+## Engineering findings
 
-## Project layout
+Problems found by testing on a live cluster, and what changed because of them:
 
-```
-cloudops-bridge/
-├── ticket_service/          # Demo Ticket Service
-│   ├── main.py              #   API routes
-│   ├── inventory.py         #   in-memory, thread-safe ticket inventory
-│   └── metrics.py           #   Prometheus-format request/ticket metrics
-├── bridge/                  # CloudOps Bridge
-│   ├── main.py              #   API routes + enrichment logic
-│   ├── catalog.py           #   loads and validates service-catalog/*.yaml
-│   ├── alertmanager.py      #   Alertmanager webhook schema + per-alert processing (Phase 6)
-│   └── models.py            #   Pydantic schemas (catalog + API)
-├── service-catalog/
-│   └── ticket-api.yaml      # Dev/CloudOps handoff contract
-├── runbooks/
-│   ├── high-error-rate.md
-│   └── ticket-service-target-down.md
-├── tests/
-├── ticket_service/Dockerfile, bridge/Dockerfile
-├── compose.yaml             # starts both containers
-├── kubernetes/              # Phase 3 manifests, ConfigMap generator, demo tools
-│   └── monitoring/          # Phase 4–5 Prometheus, Grafana, alert rules, Alertmanager
-├── dashboards/              # Grafana dashboard JSON (source of truth)
-├── loadtest/                # Phase 7 on-sale load generator (Job), kept outside kubernetes/
-├── .dockerignore
-├── requirements.txt         # runtime deps (installed in images)
-├── requirements-dev.txt     # runtime + test deps (local development)
-└── pytest.ini
-```
+1. **Rolling updates dropped requests.** The first rolling update dropped 4 of 198 requests, even though it never went below 2 Ready pods: Kubernetes sends SIGTERM at the same time as it removes the pod from the Service, so the process exited before routing stopped sending it traffic. A 5 s `preStop` hook fixed it; every rollout test since measured 0 failed requests from inside the cluster.
+2. **`kubectl rollout undo` can redeploy the broken release.** After an earlier rollback, `undo` went back to the bad image. The runbook now says to check the history and roll back to an explicitly chosen known-good revision.
+3. **Alertmanager notifications aren't one-to-one with events.** A resolved notification also carried an older, already-resolved alert. The Bridge therefore processes every alert in a notification individually and keeps no state between notifications.
+4. **Handing replica ownership to the HPA can drop a service to 1 pod.** Removing `replicas` from a Deployment created with it makes `kubectl apply` delete the field, and Kubernetes falls back to 1 replica. Running `kubectl apply set-last-applied` first made the transition safe: verified at 2/2 with the same pods throughout.
 
-## Run locally without Docker (macOS)
+Short-lived target-down states also showed why alert timing matters: one alert fired for a terminating pod during a rollout, and during scale-up a brand-new pod was scraped before it listened (pending for about 15 s, never fired). The 15 s `for` values here are demo values; production uses minutes.
 
-Requires Python 3.10+ (`python3 --version`).
+## Quick start (kind)
 
-> Code blocks in this README contain only commands, no `#` comments, so they paste cleanly into zsh (the macOS default shell), which doesn't treat `#` as a comment at an interactive prompt.
-
-Create an isolated Python environment, activate it (your prompt then shows `(.venv)`), and install the pinned app and test dependencies:
+**Prerequisites:** Docker Desktop running, `kind` (`brew install kind`), and kubectl 1.36 or newer (`brew install kubernetes-cli`). Code blocks contain only commands, so they paste cleanly into zsh.
 
 ```bash
+git clone https://github.com/rithikkampa7-pixel/cloudops-bridge.git
 cd cloudops-bridge
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements-dev.txt
-```
-
-Use two terminal tabs, and activate the venv in each one (`source .venv/bin/activate`).
-
-Tab 1, Ticket API on port 8080:
-
-```bash
-uvicorn ticket_service.main:app --port 8080 --reload
-```
-
-Tab 2, CloudOps Bridge on port 8081:
-
-```bash
-uvicorn bridge.main:app --port 8081 --reload
-```
-
-Interactive API docs: http://localhost:8080/docs and http://localhost:8081/docs
-
-## Run with Docker (Phase 2)
-
-**Prerequisites:** [Docker Desktop for Mac](https://www.docker.com/products/docker-desktop/) running (`docker version` shows a Server section). Ports 8080 and 8081 must be free. Stop the local uvicorn servers first if they're running.
-
-Build both images and start them in the background, then check status. Both should show `(healthy)` after about 5–10 seconds:
-
-```bash
-docker compose up --build -d
-docker compose ps
-```
-
-Every curl request in [Example requests](#example-requests) works unchanged against the containers.
-
-| What | How it's done |
-|---|---|
-| Base image | `python:3.13.16-slim-trixie` (pinned, never `latest`) |
-| Non-root | Runs as `app` (UID 10001). App code is owned by root, so the process can't modify it |
-| Health checks | Docker `HEALTHCHECK` calls `/health` using Python's standard library (no curl in the image) |
-| Config | Bridge reads `CATALOG_DIR=/etc/cloudops-bridge/service-catalog` and `RUNBOOK_DIR=/etc/cloudops-bridge/runbooks`, bind-mounted **read-only** from the repo. Edit the YAML, then `docker compose restart bridge`, with no rebuild |
-| Shutdown | uvicorn runs as PID 1 (exec-form `CMD`), so `docker compose down` triggers a graceful shutdown |
-| Image contents | Runtime dependencies only (`requirements.txt`). No tests, pytest, or dev tools |
-
-The catalog is deliberately **not** baked into the bridge image. Without the mount, the bridge refuses to start (`Catalog directory not found`). That's the same fail-fast behavior as a broken YAML file.
-
-**Logs.** `-f` follows the log live; press Ctrl+C to stop following:
-
-```bash
-docker compose logs ticket-service
-docker compose logs -f bridge
-```
-
-`127.0.0.1` entries are Docker's health check running inside the container. Requests from your Mac arrive from Docker Desktop's gateway (`192.168.65.1`).
-
-**Verify non-root.** Expect `uid=10001(app)` from both containers, and `Uid: 10001 ...` for PID 1, the uvicorn process itself:
-
-```bash
-docker compose exec ticket-service id
-docker compose exec bridge id
-docker compose exec bridge grep Uid /proc/1/status
-```
-
-**Verify config is read-only.** This command is *expected to fail* with `Read-only file system`, and the inspect should print `RW=false` twice:
-
-```bash
-docker compose exec bridge touch /etc/cloudops-bridge/service-catalog/test
-docker inspect cloudops-bridge-bridge-1 --format '{{range .Mounts}}{{.Destination}} RW={{.RW}}{{"\n"}}{{end}}'
-```
-
-**Stop** and remove the containers and network:
-
-```bash
-docker compose down
-```
-
-Inventory is in memory, so it resets to 5000 whenever the ticket-service container is recreated.
-
-## Run on Kubernetes with kind (Phase 3)
-
-Full guide, including failure, rollout and rollback demonstrations and troubleshooting: **[kubernetes/README.md](kubernetes/README.md)**.
-
-**Prerequisites:** Docker Desktop running, `kind` (`brew install kind`), and kubectl 1.36 or newer (`brew install kubernetes-cli`; kind v0.33 runs Kubernetes 1.37). Stop Docker Compose first if it's running, because port-forwarding uses the same ports.
-
-Create the cluster, build the images, load them into kind, and deploy:
-
-```bash
 kind create cluster --name cloudops-bridge
 kubectl wait --for=condition=Ready node --all --timeout=120s
 docker build -t cloudops-bridge-ticket-service:phase3 -f ticket_service/Dockerfile .
@@ -220,181 +168,19 @@ kubectl -n monitoring rollout status deployment/kube-state-metrics --timeout=300
 kubectl -n cloudops-bridge wait --for=jsonpath='{.status.readyReplicas}'=2 deployment/ticket-service --timeout=300s
 ```
 
-The second command generates a random Grafana admin password into a Kubernetes Secret only if it doesn't exist yet (it prints `NotFound` first on a fresh cluster). It's never stored in Git.
+The Grafana admin password is generated into a Kubernetes Secret at deploy time and never stored in Git (the `get secret` prints `NotFound` first on a fresh cluster). The last `wait` matters because the HPA owns the replica count: a fresh Deployment starts at 1 replica and the HPA raises it to 2. The `:phase3` image tag is a historical name, kept so all manifests and commands stay consistent.
 
-The last `wait` matters since Phase 7: ticket-service's replica count belongs to the HPA (minimum 2), so a fresh Deployment starts at 1 and the HPA raises it to 2 within the same second.
-
-Inspect. Both Deployments should be `2/2`, with four pods `1/1 Running`:
-
-```bash
-kubectl -n cloudops-bridge get deployments,pods,services,configmaps
-```
-
-Test every endpoint from inside the cluster, through the Services:
+Test every endpoint from inside the cluster, then open Grafana (port-forward in its own tab, log in as `admin` with the password copied to your clipboard):
 
 ```bash
 kubectl -n cloudops-bridge exec -i deploy/bridge -- python - < kubernetes/tools/smoke_test.py
-```
-
-Or from your Mac. Run each port-forward in its own tab, then use the [example requests](#example-requests):
-
-```bash
-kubectl -n cloudops-bridge port-forward svc/ticket-service 8080:8080
-```
-
-```bash
-kubectl -n cloudops-bridge port-forward svc/bridge 8081:8081
-```
-
-First places to look when something is wrong (details in [kubernetes/README.md](kubernetes/README.md#9-troubleshooting-commands-when-each-one-helps)):
-
-```bash
-kubectl -n cloudops-bridge get pods
-kubectl -n cloudops-bridge describe pod POD_NAME
-kubectl -n cloudops-bridge logs POD_NAME --previous
-kubectl -n cloudops-bridge get events --sort-by=.lastTimestamp
-kubectl -n cloudops-bridge rollout history deployment/ticket-service
-```
-
-Clean up. The cluster can be rebuilt from scratch with the commands above:
-
-```bash
-kind delete cluster --name cloudops-bridge
-```
-
-What Phase 3 demonstrates, all verified on a live cluster:
-
-- **Liveness:** a frozen (`SIGSTOP`) uvicorn process is pulled from traffic by readiness in ~10 s and restarted by liveness in ~40 s.
-- **Reconciliation:** a deleted pod is replaced because the Deployment declares 2 replicas.
-- **Rolling update:** zero failed requests, measured from inside the cluster. This needed a `preStop` hook, because the first version dropped 4 requests to a termination race.
-- **Rollback:** a broken image stalls the rollout without losing capacity (`maxUnavailable: 0`), and `rollout undo` restores it.
-- **Security:** the containers run as UID 10001 with a read-only root filesystem, no capabilities, seccomp enabled and no privilege escalation. The ConfigMap mounts are read-only.
-
-## Monitoring with Prometheus and Grafana (Phase 4)
-
-Full guide, with discovery details, PromQL, controlled tests, security decisions and troubleshooting: **[kubernetes/monitoring/README.md](kubernetes/monitoring/README.md)**.
-
-```
-real request → ticket-service pod /metrics → Prometheus (scrapes every pod, found via the Kubernetes API) → PromQL → Grafana dashboard
-```
-
-Prometheus and Grafana deploy with everything else in the Phase 3 steps above (namespace `monitoring`). Then, with each port-forward in its own tab:
-
-```bash
-kubectl -n monitoring port-forward svc/prometheus 19090:9090
-```
-
-```bash
+kubectl -n monitoring get secret grafana-admin -o jsonpath='{.data.admin-password}' | base64 -d | pbcopy
 kubectl -n monitoring port-forward svc/grafana 13000:3000
 ```
 
-Check that both ticket-service pods are discovered and `UP`, and send known traffic:
+Then open http://localhost:13000. Ports 19090 (Prometheus), 13000 (Grafana) and 19093 (Alertmanager) avoid clashing with tools commonly running on the default ports.
 
-```bash
-python3 kubernetes/tools/promql.py --targets
-kubectl -n cloudops-bridge exec -i deploy/bridge -- python - 600 < kubernetes/tools/generate_traffic.py
-python3 kubernetes/tools/promql.py 'sum by (path, status) (http_requests_total{job="ticket-service",path!~"/health|/ready|/metrics"})'
-```
-
-Copy the generated Grafana password to the clipboard without printing it, then open http://localhost:13000 and log in as `admin`:
-
-```bash
-kubectl -n monitoring get secret grafana-admin -o jsonpath='{.data.admin-password}' | base64 -d | pbcopy
-```
-
-What Phase 4 demonstrates, all verified on a live cluster:
-
-- **Discovery:** Prometheus watches the Kubernetes API for `app.kubernetes.io/name=ticket-service` pods and scrapes each one directly. A replacement pod was a target within 3 seconds, with no config change.
-- **Exact numbers:** 600 / 60 / 30 / 24 requests and 120 tickets sent; the same counts in Prometheus.
-- **Honest multi-replica data:** `tickets_available` is shown per pod (for example 4942 and 4938), never summed, because each pod has its own inventory.
-- **Failure visibility:** a frozen pod went to `up=0` within one scrape interval. In one run that was before Kubernetes marked it NotReady, in another after (the order depends on where each probe or scrape cycle falls), and `up` stayed 0 for a few seconds after the pod was Ready again. They're independent signals.
-- **Real issues found and fixed:** Grafana 13's plugin installer broke the Prometheus data source under a read-only root filesystem; the Grafana image put its user in the root group; the Prometheus image's non-numeric user blocked `runAsNonRoot`.
-- **Declarative:** the data source, dashboard and scrape config come from Git. Monitoring *history* is ephemeral by design.
-
-Ports 19090 and 13000 are used because other local projects occupy 3000, 3001 and 9090–9094.
-
-## Alerting with Prometheus rules and Alertmanager (Phase 5)
-
-Full guide, with the alert lifecycle, rule semantics, label contract, routing, live demonstrations and measured timings: **[kubernetes/monitoring/README.md, section 10](kubernetes/monitoring/README.md#10-alerting-phase-5)**.
-
-```
-ticket-service /metrics → Prometheus evaluates rules every 15s → pending → firing → Alertmanager (grouped, tracked) → resolved
-```
-
-> Since Phase 6, ticket-api alerts are delivered to CloudOps Bridge (next section). There's still no email, chat or paging.
-
-| Alert | Fires when | Live result |
-|---|---|---|
-| `TicketServiceTargetDown` | `up{job="ticket-service"} == 0` for 15s | Frozen pod: **pending** at +19–28 s, **firing** and in Alertmanager at +34–41 s, Kubernetes restarted it, **resolved** in both at +50–56 s (three runs) |
-| `HighErrorRate` | 5xx are more than 5% of app requests over 2m, with traffic above 0.1 req/s, for 1m | Loaded and unit-tested (promtool). Stayed inactive under **7.5% 4xx** traffic, correctly. **Not fired live:** the app can't produce 5xx without an approved change |
-
-Alerts carry `alertname`, `service="ticket-api"` and `environment="production"`, matching the service catalog, which the Bridge uses to map them to owners and runbooks. Alertmanager is reachable with `kubectl -n monitoring port-forward svc/alertmanager 19093:9093`, at http://localhost:19093.
-
-Validate the configuration with the real tools (Docker required, venv active):
-
-```bash
-./kubernetes/monitoring/validate-alerting.sh
-```
-
-The `for` values are demo values, chosen to be observable before Kubernetes self-heals a pod. A one-off false positive during a rolling update showed why production uses minutes instead (documented in the guide).
-
-## Incident enrichment: Alertmanager → CloudOps Bridge (Phase 6)
-
-Full guide, with routing, payload handling, outcomes, status policy, logging, the trust boundary, the end-to-end demo and measured timings: **[kubernetes/monitoring/README.md, section 11](kubernetes/monitoring/README.md#11-incident-enrichment-alertmanager--cloudops-bridge-phase-6)**.
-
-A raw alert, *"TicketServiceTargetDown on pod X"*, becomes an enriched incident:
-
-```
-status=firing  alert=TicketServiceTargetDown  service=ticket-api  environment=production  severity=warning
-affected: pod=ticket-service-7fc4bd87d9-vh495  instance=10.244.0.13:8080
-first responder: cloudops   owners: Ticket Development (app), CloudOps (platform)
-dependencies: postgresql    endpoints: /health, /ready
-runbook: ticket-service-target-down.md   + 6 suggested checks from the catalog
-```
-
-These values come from the alert's labels plus `service-catalog/ticket-api.yaml`. Nothing is hardcoded and nothing is diagnosed.
-
-- **`POST /webhooks/alertmanager`** accepts Alertmanager's real v4 payload, processes **each alert individually** (firing and resolved), and maps by `alertname` / `service` / `environment`. Each alert's outcome is `enriched`, `unmapped` (a catalog gap: no invented runbook), or `rejected`.
-- **`POST /incidents/enrich`** is unchanged, and shares the same lookup.
-- **Verified live, three times** (once on a cluster rebuilt from scratch): a frozen pod led to Prometheus FIRING, which led to Alertmanager's **own** webhook. The Bridge logged `outcome=enriched` with the full context (~9 s after Alertmanager had the alert, `group_wait`). After recovery, the **resolved** webhook arrived 60 s after the firing one (`group_interval`), with the same fingerprint. Alertmanager recorded 0 delivery failures.
-- **Found live:** a resolved webhook carried an *older* resolved alert again (Prometheus re-sends resolved alerts for 15 min), so the Bridge treats notifications as batches of independent alerts.
-- **Limits:** nothing is persisted (logs and responses only); the webhook has no authentication (ClusterIP-only, trusted local cluster; not production-secure); only `ticket-api` is routed.
-
-Watch deliveries from both Bridge pods:
-
-```bash
-kubectl -n cloudops-bridge logs -f -l app.kubernetes.io/name=bridge --prefix --since=1s | grep -E 'event=|POST /webhooks'
-```
-
-Try the webhook in isolation with a sample payload, for example under Docker Compose. This is **not** a real Alertmanager delivery:
-
-```bash
-curl -s -X POST localhost:8081/webhooks/alertmanager -H 'Content-Type: application/json' --data @tests/fixtures/alertmanager_target_down_firing.json | python3 -m json.tool
-```
-
-## Autoscaling under a ticket on-sale spike (Phase 7)
-
-Full guide (how the HPA works, safe migration, the scenario, how to run and observe it, all measured results and limitations): **[kubernetes/README.md, section 11](kubernetes/README.md#11-autoscaling-hpa-phase-7)**. Scaling metrics and the Grafana row: [kubernetes/monitoring/README.md, section 12](kubernetes/monitoring/README.md#12-scaling-metrics-and-dashboard-phase-7).
-
-```
-20 req/s ──► 200 req/s on-sale spike ──► 20 req/s
-  2 pods      CPU > 70% of request: HPA adds pods   after 5 min of low CPU, HPA removes pods
-```
-
-- **Real traffic, no fake CPU.** The app is unchanged. Real `GET /tickets` browsing plus 5% single-ticket purchases are enough: measured CPU rises roughly linearly, from ~8m idle to ~119m per pod at 120 req/s per pod.
-- **The HPA scales ticket-service between 2 and 6 replicas** at **70% of the 50m CPU request** (~35m per pod). The Deployment no longer sets `replicas`: the HPA owns it.
-- **Acceptance run** (fresh cluster, README commands only):
-  - Scale-up: 2 → 4 at +24 s into the spike, then 4 → 6 at +39 s, with 6 pods Ready at +51 s.
-  - Scale-down after the 300 s window: 6 → 4 → 3 → 2.
-  - The load generator achieved exactly 20 / 200 / 20 req/s with **0 failures** (73,200 requests; p95 ≤ 7.7 ms).
-  - The **independent** checker: **10,197 OK, 0 failed** across the whole event, including every scale-down.
-- **Honest limits:**
-  - One laptop node, not production capacity.
-  - 6 replicas were still above target during the spike: the ceiling was reached.
-  - kubelet TLS isn't verified on kind.
-  - **Each replica has its own in-memory inventory**, so new pods start with 5,000 fresh tickets and removed pods take their sales with them. PostgreSQL is still future work.
-
-Start the scenario:
+Run the on-sale scenario (about 16 minutes of traffic, then up to 5 minutes more for scale-down) and watch the HPA's decisions:
 
 ```bash
 kubectl apply -f loadtest/loadgen-configmap.yaml
@@ -403,91 +189,104 @@ kubectl create -f loadtest/ticket-sale-job.yaml
 python3 kubernetes/tools/scale_watch.py 1200 5
 ```
 
-## Example requests
+Clean up with `kind delete cluster --name cloudops-bridge`. Monitoring history lives only inside the cluster and is deleted with it.
 
-Ticket API:
+## Demo
 
-```bash
-curl -s localhost:8080/health
-curl -s localhost:8080/ready
-curl -s localhost:8080/tickets
-curl -s -X POST localhost:8080/tickets/purchase -H 'Content-Type: application/json' -d '{"quantity": 2}'
-curl -s localhost:8080/metrics
-```
+[docs/demo.md](docs/demo.md) is a guided walkthrough of the verified procedures: the dashboard, the on-sale autoscaling scenario, and the real Alertmanager-to-Bridge incident path.
 
-CloudOps Bridge:
+To run just the two APIs without Kubernetes (local Python or Docker Compose), with example requests and error responses, see [docs/local-development.md](docs/local-development.md).
 
-```bash
-curl -s localhost:8081/ready
-curl -s localhost:8081/services
-curl -s -X POST localhost:8081/incidents/enrich -H 'Content-Type: application/json' -d '{"service":"ticket-api","environment":"production","alert":"HighErrorRate"}' | python3 -m json.tool
-```
+## Technology
 
-Error cases. `-w` prints the HTTP status code; expect `[404]`, `[422]`, `[422]`:
-
-```bash
-curl -s -w ' [%{http_code}]\n' -X POST localhost:8081/incidents/enrich -H 'Content-Type: application/json' -d '{"service":"payments","environment":"production","alert":"HighErrorRate"}'
-curl -s -w ' [%{http_code}]\n' -X POST localhost:8081/incidents/enrich -H 'Content-Type: application/json' -d '{"service":"ticket-api"}'
-curl -s -w ' [%{http_code}]\n' -X POST localhost:8080/tickets/purchase -H 'Content-Type: application/json' -d '{"quantity": 0}'
-```
-
-Example enriched incident:
-
-```json
-{
-  "service": "ticket-api",
-  "environment": "production",
-  "alert": "HighErrorRate",
-  "summary": "Elevated rate of HTTP 5xx responses.",
-  "severity": "critical",
-  "first_responder": "cloudops",
-  "application_owner": "Ticket Development",
-  "cloudops_owner": "CloudOps",
-  "dependencies": ["postgresql"],
-  "health_endpoint": "/health",
-  "readiness_endpoint": "/ready",
-  "runbook": "high-error-rate.md",
-  "suggested_checks": [
-    "Check application health (GET /health and /ready)",
-    "Review application logs for new or repeated exceptions",
-    "Check recent deployments",
-    "Verify database connectivity",
-    "Consider rollback if deployment-related"
-  ]
-}
-```
-
-## Error handling
-
-| Situation | Response |
+| Area | Tools |
 |---|---|
-| Ticket quantity < 1, > 10, or not an integer | `422` |
-| More tickets requested than available | `409 Conflict` |
-| Unknown service | `404` |
-| Known service, unknown environment or alert | `422` |
-| Missing fields or malformed JSON | `422` |
-| Unexpected server error | `500 {"detail": "Internal server error"}` (stack trace logged, never returned) |
+| Applications | Python 3.13, FastAPI, Pydantic, uvicorn; YAML service catalog, Markdown runbooks |
+| Containers | Docker, Docker Compose; pinned `python:3.13.16-slim-trixie` base image |
+| Kubernetes | kind (Kubernetes 1.37), Deployments, Services, ConfigMaps, HorizontalPodAutoscaler, metrics-server v0.9.0 |
+| Observability | Prometheus v3.14.0, Grafana 13.2.2, Alertmanager v0.34.1, kube-state-metrics v2.20.0 |
+| Testing | pytest, promtool, amtool |
 
-The Bridge **validates the catalog at startup** and refuses to start if a YAML file is malformed, so a broken handoff file is caught before an incident, not during one.
-
-## Design notes
-
-- **Catalog-driven, not hardcoded.** To add a service, add a YAML file. No Python changes are needed.
-- **Severity depends on environment.** `HighErrorRate` is `critical` in production and `warning` in staging.
-- **Documentation gaps are visible.** `HighLatency` deliberately has no runbook. The Bridge returns `runbook: null` and adds a reminder to document the fix afterward.
-- **A test checks that every runbook referenced in the catalog exists**, so the catalog and the docs can't drift apart.
-- **The inventory lives in memory** and resets on restart. On Kubernetes, each of the 2 ticket-service pods has its *own* inventory, so counts differ depending on which pod serves the request. PostgreSQL arrives in a later phase.
-- **ConfigMaps are generated, not hand-written.** `kubernetes/generate-configmaps.sh` builds them from `service-catalog/` and `runbooks/`, and a test fails if they drift from those files.
-- **The bridge has a separate `/ready`.** It returns 200 only when the catalog is loaded, and 503 otherwise. `/health` only means the process is alive.
+Plain manifests, no Helm: every object is visible and reviewed, and charts would install components this project doesn't need.
 
 ## Tests
 
-Tests run outside Docker, against the code directly:
-
 ```bash
+python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements-dev.txt
 pytest -v
+./kubernetes/monitoring/validate-alerting.sh
 ```
 
-85 pytest tests, plus promtool rule unit tests (`./kubernetes/monitoring/validate-alerting.sh`, needs Docker). The pytest tests cover health, readiness (including bridge `/ready` returning 503 without a catalog), tickets, valid and invalid purchases, the sold-out case, the metrics format, enrichment, environment-based severity, the missing-runbook case, unknown service, unknown environment or alert, missing or invalid fields, malformed JSON, catalog integrity, ConfigMaps matching their source files, and monitoring configuration: Prometheus discovery matching the Deployment's labels and port, counters always wrapped in `rate()`/`increase()`, per-pod inventory never aggregated, namespaced read-only RBAC, no committed Secrets, the Grafana plugin regression guard, and the Alertmanager webhook (real v4 payloads, per-alert outcomes, firing/resolved, batches, unknown/missing labels, malformed input, 503 when the catalog isn't loaded, log fields, HighErrorRate compatibility), autoscaling (the HPA targets the Deployment on CPU with a request present and no `replicas` field; metrics-server is pinned and differs from upstream only by `--kubelet-insecure-tls`, verified by checksum; kube-state-metrics is pinned, namespaced and read-only; the kubelet scrape keeps only two metrics; Prometheus's only cluster-wide access is `nodes` list/watch + `nodes/metrics`, never `nodes/proxy`; the load generator's profile parsing, request mix, failure categories and per-phase summaries; every dashboard metric comes from a configured scrape job), and alerting wiring: Prometheus loads the mounted rules and targets the real Alertmanager Service, HighErrorRate counts only 5xx, TargetDown is scoped to ticket-service, alert labels match the service catalog, monitoring images are pinned, and Alertmanager sends only ticket-api alerts, only to the in-cluster Bridge webhook, with `send_resolved: true`, and every Prometheus alert has a catalog entry with matching severity.
+85 pytest tests, plus `promtool`/`amtool` validation and rule unit tests (the last command, which needs Docker).
+
+| Area | What the tests protect |
+|---|---|
+| APIs | Health and readiness, ticket listing and purchases, sold-out and invalid input, metrics format, enrichment, environment-based severity, unknown service/environment/alert, missing runbook, malformed JSON |
+| Catalog and runbooks | The catalog validates; every runbook it references exists; generated ConfigMaps match their sources |
+| Alertmanager webhook | Real v4 payloads, per-alert outcomes, firing and resolved, batches, unknown or missing labels, malformed input, 503 without a catalog, log fields |
+| Monitoring and alerting | Prometheus discovery matches the Deployment, counters always use `rate()`/`increase()`, per-pod inventory is never summed, every dashboard metric comes from a configured scrape job, alert labels match the catalog, Alertmanager routes only ticket-api to the in-cluster Bridge |
+| Autoscaling | The HPA targets the Deployment on CPU, a CPU request exists, the Deployment has no `replicas` field, metrics-server differs from upstream only by one kind flag (checksum-verified), the load generator's profile, request mix, failure categories and summaries |
+| Security | No committed Secrets, pinned images, exact RBAC rules |
+
+**Generated files are committed on purpose.** The ConfigMaps under `kubernetes/config/`, the Grafana dashboard ConfigMap and the load-generator ConfigMap are generated by `kubernetes/generate-configmaps.sh` from `service-catalog/`, `runbooks/`, `dashboards/` and `loadtest/`. They're committed so `kubectl apply -R` works from a clean checkout, and a test fails if any of them drifts from its source.
+
+## Security considerations
+
+- **Containers:** non-root (UID 10001 for the apps), read-only root filesystem, all capabilities dropped, no privilege escalation, `RuntimeDefault` seccomp. The catalog and runbooks are mounted read-only.
+- **No secrets in Git.** The only credential, Grafana's admin password, is generated at deploy time into a Kubernetes Secret; a test fails if a Secret is committed.
+- **Least-privilege RBAC.** Prometheus discovers pods through a namespaced, read-only Role. Its only cluster-wide permission, needed for kubelet CPU metrics, is listing nodes and reading `nodes/metrics`, never `nodes/proxy`. Its scrape keeps only two CPU and memory metrics for the app namespace; that limits what is *stored*, not what the permission can *read*. kube-state-metrics uses a namespaced list/watch Role.
+- **Pinned images** everywhere; metrics-server is vendored from the official release and checksum-verified.
+- **Local-only shortcuts:** on kind, metrics-server and Prometheus don't verify the kubelet's TLS certificate (`--kubelet-insecure-tls`, `insecure_skip_verify`). The Bridge webhook has **no authentication**; it is reachable only inside the cluster (ClusterIP). Neither is acceptable in production.
+
+## Limitations
+
+- **Local, single node.** All results come from one kind node on a laptop. They show Kubernetes behavior, not production capacity or performance.
+- **The HPA hit its ceiling.** During the spike, 6 replicas (the configured maximum) still ran above the 70% CPU target.
+- **Per-replica in-memory inventory.** Each ticket-service pod has its own 5,000 tickets. New pods start fresh and removed pods lose their sales, so pods disagree and totals can't be summed. Shared state (PostgreSQL) isn't implemented.
+- **`HighErrorRate` hasn't fired live.** It is unit-tested and stayed correctly silent under 4xx traffic, but the app has no safe way to produce 5xx without adding a failure-injection endpoint, which this project deliberately doesn't do. A `HighLatency` alert isn't possible yet: the app exports no latency metric.
+- **No persistence or notification channels.** Incidents exist only in the Bridge's logs and HTTP responses. There's no email, chat or paging, and only `ticket-api` alerts are routed to the Bridge.
+- **Demo alert timings.** The 15 s `for` values are chosen to be observable before Kubernetes self-heals a pod; one false positive was observed during a rolling update.
+- **Monitoring history is ephemeral**: Prometheus and Grafana data are lost when the cluster is deleted. Configuration comes from Git.
+- **Context, not diagnosis.** The Bridge doesn't determine root causes or remediate.
+
+## Repository structure
+
+```
+cloudops-bridge/
+├── ticket_service/          # demo Ticket Service (FastAPI): API, in-memory inventory, /metrics
+├── bridge/                  # CloudOps Bridge (FastAPI): catalog loading, enrichment, Alertmanager webhook
+├── service-catalog/         # one YAML file per service: the Dev/CloudOps handoff contract
+├── runbooks/                # Markdown runbooks referenced by the catalog
+├── dashboards/              # Grafana dashboard JSON (source of truth)
+├── kubernetes/              # manifests, ConfigMap generator, demo tools; guide in kubernetes/README.md
+│   ├── monitoring/          # Prometheus, Grafana, alert rules, Alertmanager, kube-state-metrics
+│   ├── metrics-server/      # vendored metrics-server for the HPA
+│   └── tools/               # smoke test, availability checker, traffic, PromQL, alert and scaling watchers
+├── loadtest/                # on-sale load generator Job (outside kubernetes/, so apply -R never starts it)
+├── tests/                   # pytest suite, promtool rule tests, sample Alertmanager payload
+├── docs/                    # demo walkthrough, local development, images
+└── compose.yaml             # runs the two applications with Docker Compose
+```
+
+## Detailed documentation
+
+- **[kubernetes/README.md](kubernetes/README.md):** deploying to kind; security verification; failure, rollout and rollback demonstrations; troubleshooting; autoscaling method and measured results.
+- **[kubernetes/monitoring/README.md](kubernetes/monitoring/README.md):** Prometheus discovery and PromQL, the Grafana dashboard, alert rules and Alertmanager, incident enrichment end to end, scaling metrics.
+- **[docs/demo.md](docs/demo.md):** guided walkthrough.
+- **[docs/local-development.md](docs/local-development.md):** local Python and Docker Compose, example requests, error handling.
+
+## Build history
+
+The project was built in stages; each was verified on a live cluster before it was committed.
+
+| Stage | Commit | Added |
+|---|---|---|
+| 1 | `59620c2` | Ticket Service, CloudOps Bridge, service catalog, runbook, tests |
+| 2 | `bb95b45` | Docker images and Docker Compose |
+| 3 | `1897a69` | Kubernetes on kind: probes, resources, security context, rollouts and rollback |
+| 4 | `d5eb3b8` | Prometheus and Grafana |
+| 5 | `bc30a51` | Alert rules and Alertmanager |
+| 6 | `cc926c0` | Alertmanager → CloudOps Bridge incident enrichment |
+| 7 | `9cfde3d` | HorizontalPodAutoscaler and the ticket on-sale load test |

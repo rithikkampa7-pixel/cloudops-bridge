@@ -496,7 +496,7 @@ data:
           "id": 9,
           "type": "timeseries",
           "title": "Tickets available by pod (inventory is per pod)",
-          "description": "Raw gauge per pod, deliberately NOT summed or averaged. Each replica keeps its own in-memory inventory (starting at 5000), so values diverge depending on which pod served each purchase, and a restarted pod resets to 5000. This is a known limitation; shared state (PostgreSQL) is a future phase.",
+          "description": "Raw gauge per pod, deliberately NOT summed or averaged. Each replica keeps its own in-memory inventory (starting at 5000), so values diverge depending on which pod served each purchase, and a restarted pod resets to 5000. This is a known limitation; shared state (PostgreSQL) is future work.",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"

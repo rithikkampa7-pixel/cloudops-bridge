@@ -89,11 +89,14 @@ data:
     kubectl -n cloudops-bridge delete pod POD_NAME
     ```
 
-    - **Overloaded:** scale out manually (autoscaling arrives in a later phase). Afterward, scale back or re-apply the manifests, because the manifests declare 2 replicas:
+    - **Overloaded:** the HorizontalPodAutoscaler already adds replicas on CPU (2–6 replicas, 70% of the CPU request). Check whether it is scaling, and whether it has reached its maximum:
 
     ```bash
-    kubectl -n cloudops-bridge scale deployment/ticket-service --replicas=3
+    kubectl -n cloudops-bridge get hpa ticket-service
+    kubectl -n cloudops-bridge describe hpa ticket-service
     ```
+
+    Don't `kubectl scale` the Deployment: the HPA owns the replica count and overrides a manual change on its next decisions (a scale-down after its 300 s stabilization window). If the HPA is at 6 replicas and CPU is still above target, raising `maxReplicas` in `kubernetes/ticket-service/hpa.yaml` is a reviewed configuration change. More replicas won't fix 5xx caused by a bug or a failing dependency.
 
     ## Rollback
 
@@ -133,7 +136,8 @@ data:
 
     It does **not** mean the service is down:
 
-    - The other replica usually keeps serving.
+    - The other replicas (at least one; the HPA keeps 2–6) usually keep serving.
+    - **A pod the HPA has just created** can be scraped once before it listens. That usually clears within one or two scrapes and never reaches `firing`; check the pod's age.
     - Prometheus scrapes each pod directly, independent of Kubernetes readiness. The pod can be NotReady, Ready, or already restarted when you look.
     - **Kubernetes may already be fixing it.** A hung pod is restarted by its liveness probe within about 45 s. Don't restart anything until you know what failed.
 
@@ -198,7 +202,7 @@ data:
 
     ## 3. Escalation
 
-    - **CloudOps lead:** the target stays `DOWN` while the pod is Ready (monitoring path), both replicas are affected, or there's no recovery after 15 minutes.
+    - **CloudOps lead:** the target stays `DOWN` while the pod is Ready (monitoring path), every replica is affected, or there's no recovery after 15 minutes.
     - **Development (Ticket Development):** repeated restarts with application errors in `logs --previous`.
     - Include the alert labels (`pod`, `instance`), the scrape error text, and `RESTARTS` and events.
 

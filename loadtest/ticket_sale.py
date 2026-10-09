@@ -1,4 +1,4 @@
-"""Ticket on-sale traffic for the Phase 7 autoscaling demonstration.
+"""Ticket on-sale traffic for the autoscaling demonstration.
 
 Open-loop load: requests are scheduled at the configured rate regardless of
 how fast responses come back, the way independent customers arrive. A fixed

@@ -1,4 +1,4 @@
-"""Static checks on the Phase 5 alerting configuration.
+"""Static checks on the alerting configuration.
 
 Rule *logic* is unit-tested with promtool (tests/prometheus/, run by
 kubernetes/monitoring/validate-alerting.sh). These tests protect the wiring

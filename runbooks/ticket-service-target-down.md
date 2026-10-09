@@ -11,7 +11,8 @@ Prometheus failed to scrape `/metrics` on **one ticket-service pod** for at leas
 
 It does **not** mean the service is down:
 
-- The other replica usually keeps serving.
+- The other replicas (at least one; the HPA keeps 2–6) usually keep serving.
+- **A pod the HPA has just created** can be scraped once before it listens. That usually clears within one or two scrapes and never reaches `firing`; check the pod's age.
 - Prometheus scrapes each pod directly, independent of Kubernetes readiness. The pod can be NotReady, Ready, or already restarted when you look.
 - **Kubernetes may already be fixing it.** A hung pod is restarted by its liveness probe within about 45 s. Don't restart anything until you know what failed.
 
@@ -76,7 +77,7 @@ kubectl -n cloudops-bridge delete pod POD_NAME
 
 ## 3. Escalation
 
-- **CloudOps lead:** the target stays `DOWN` while the pod is Ready (monitoring path), both replicas are affected, or there's no recovery after 15 minutes.
+- **CloudOps lead:** the target stays `DOWN` while the pod is Ready (monitoring path), every replica is affected, or there's no recovery after 15 minutes.
 - **Development (Ticket Development):** repeated restarts with application errors in `logs --previous`.
 - Include the alert labels (`pod`, `instance`), the scrape error text, and `RESTARTS` and events.
 

@@ -10,7 +10,7 @@ data:
   # Single source of truth for alert rules. Validated and unit-tested with
   # promtool by kubernetes/monitoring/validate-alerting.sh.
   #
-  # Label contract (consumed by CloudOps Bridge in a later phase):
+  # Label contract (consumed by CloudOps Bridge via the Alertmanager webhook):
   #   alertname   - matches an alert in service-catalog/<service>.yaml where one exists
   #   service     - the catalog's `service` value
   #   environment - one of the catalog's `environments`

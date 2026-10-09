@@ -1,6 +1,6 @@
 # CloudOps Bridge on Kubernetes (kind)
 
-Phase 3 runs both services on a local, single-node [kind](https://kind.sigs.k8s.io/) cluster. No cloud account, registry, or paid infrastructure is involved.
+This guide runs the whole stack (both services, monitoring, alerting, incident enrichment and autoscaling) on a local, single-node [kind](https://kind.sigs.k8s.io/) cluster. No cloud account, registry, or paid infrastructure is involved.
 
 > Every code block contains only commands (no `#` comments), so blocks paste cleanly into zsh. Run commands from the repository root, `~/cloudops-bridge`.
 
@@ -8,19 +8,21 @@ Phase 3 runs both services on a local, single-node [kind](https://kind.sigs.k8s.
 kubernetes/
 ├── namespace.yaml                     namespace cloudops-bridge
 ├── ticket-service/deployment.yaml     probes, resources, securityContext (replicas owned by the HPA)
-├── ticket-service/hpa.yaml            HorizontalPodAutoscaler: 2–6 replicas at 70% CPU (Phase 7)
-├── metrics-server/components.yaml     vendored metrics-server v0.9.0 (Phase 7)
+├── ticket-service/hpa.yaml            HorizontalPodAutoscaler: 2–6 replicas at 70% CPU
+├── metrics-server/components.yaml     vendored metrics-server v0.9.0 (CPU metrics for the HPA)
 ├── ticket-service/service.yaml        ClusterIP :8080
 ├── bridge/deployment.yaml             same, plus read-only ConfigMap mounts
 ├── bridge/service.yaml                ClusterIP :8081
 ├── config/                            GENERATED ConfigMaps (do not edit)
-├── monitoring/                        Phases 4–5: Prometheus, Grafana, alert rules, Alertmanager (see monitoring/README.md)
+├── monitoring/                        Prometheus, Grafana, alert rules, Alertmanager, kube-state-metrics (see monitoring/README.md)
 ├── generate-configmaps.sh             regenerates generated ConfigMaps from service-catalog/, runbooks/, dashboards/
 └── tools/
     ├── smoke_test.py                  in-cluster check of every endpoint
     ├── check_availability.py          polls a Service during rollouts and counts failures
-    ├── generate_traffic.py            deterministic traffic for monitoring checks (Phase 4)
-    └── promql.py                      compact PromQL / target queries from your Mac (Phase 4)
+    ├── generate_traffic.py            deterministic traffic for monitoring checks
+    ├── promql.py                      compact PromQL / target queries from your Mac
+    ├── alert_watch.py                 timeline of up, pod state, Prometheus and Alertmanager alerts
+    └── scale_watch.py                 timeline of HPA decisions, Ready replicas and per-pod CPU
 ```
 
 Monitoring (Prometheus, Grafana, dashboard, PromQL) is documented in **[monitoring/README.md](monitoring/README.md)**.
@@ -43,7 +45,7 @@ brew install kubernetes-cli
 
 ## 2. Create the cluster
 
-No kind config file is needed. The default is a single control-plane node, which is all this phase requires.
+No kind config file is needed. The default is a single control-plane node, which is all this project requires.
 
 ```bash
 kind create cluster --name cloudops-bridge
@@ -58,7 +60,7 @@ Expected: context `kind-cloudops-bridge`, then `node/cloudops-bridge-control-pla
 
 ## 3. Build and load the images
 
-The images are built from the existing Phase 2 Dockerfiles and copied straight into the kind node. Nothing is pushed to a registry.
+The images are built from the same Dockerfiles Docker Compose uses and copied straight into the kind node. Nothing is pushed to a registry. The `:phase3` tag is historical (it dates from when Kubernetes support was added) and is kept so the manifests and commands stay consistent; it doesn't mean the image is out of date.
 
 ```bash
 docker build -t cloudops-bridge-ticket-service:phase3 -f ticket_service/Dockerfile .
@@ -89,7 +91,7 @@ kubectl -n cloudops-bridge get hpa ticket-service
 
 The first deploy pulls the Prometheus, Grafana and Alertmanager images from Docker Hub, and metrics-server and kube-state-metrics from registry.k8s.io, which can take a minute.
 
-**Why the extra `wait`:** since Phase 7, the ticket-service Deployment has **no `replicas` field**, because the HorizontalPodAutoscaler owns the count (minimum 2). On a fresh cluster Kubernetes therefore starts it with **1** replica, and the HPA raises it to 2. `rollout status` returns as soon as that first pod is Ready, so the last `wait` makes sure **two** pods are Ready before you test anything. The final command should show `cpu: <n>%/70%`. If it shows `<unknown>/70%`, metrics-server is still collecting its first samples; check again after a minute. See [section 11](#11-autoscaling-hpa-phase-7).
+**Why the extra `wait`:** the ticket-service Deployment has **no `replicas` field**, because the HorizontalPodAutoscaler owns the count (minimum 2). On a fresh cluster Kubernetes therefore starts it with **1** replica, and the HPA raises it to 2. `rollout status` returns as soon as that first pod is Ready, so the last `wait` makes sure **two** pods are Ready before you test anything. The final command should show `cpu: <n>%/70%`. If it shows `<unknown>/70%`, metrics-server is still collecting its first samples; check again after a minute. See [section 11](#11-autoscaling-hpa).
 
 ## 5. Inspect
 
@@ -272,7 +274,7 @@ kubectl -n cloudops-bridge get events --sort-by=.lastTimestamp | grep -E 'Succes
 kubectl -n cloudops-bridge exec -i deploy/bridge -- python - < kubernetes/tools/smoke_test.py
 ```
 
-**Why, and how it differs from Demo A:** no probe is involved. The ReplicaSet controller sees 1 pod where the Deployment declares 2, and creates a new pod (`SuccessfulCreate`). In Demo A the *kubelet* restarted a container *inside the same pod* (`failed liveness probe, will be restarted`). Reconciliation handles pods that disappear (node loss, eviction, deletion); liveness handles pods that exist but are broken.
+**Why, and how it differs from Demo A:** no probe is involved. The ReplicaSet controller sees 1 pod where 2 are desired (the HPA's minimum, with no CPU load), and creates a new pod (`SuccessfulCreate`). In Demo A the *kubelet* restarted a container *inside the same pod* (`failed liveness probe, will be restarted`). Reconciliation handles pods that disappear (node loss, eviction, deletion); liveness handles pods that exist but are broken.
 
 ### Demo C: Rolling update with zero dropped requests
 
@@ -410,7 +412,7 @@ kubectl -n cloudops-bridge rollout status deployment/bridge
 
 Alertmanager reads its configuration only at startup too. After changing `kubernetes/monitoring/alertmanager/configmap.yaml`, apply it and restart with `kubectl -n monitoring rollout restart deployment/alertmanager`.
 
-## 11. Autoscaling (HPA, Phase 7)
+## 11. Autoscaling (HPA)
 
 > A **local** autoscaling demonstration on one kind node. It shows how Kubernetes reacts to a real traffic spike; it says nothing about production capacity or performance.
 
@@ -425,31 +427,13 @@ Alertmanager reads its configuration only at startup too. After changing `kubern
   - These are Kubernetes' default values, written out in the manifest so they're visible.
 - **Replicas belong to the HPA.** The Deployment has **no `replicas` field**; otherwise every `kubectl apply` would reset a scaled-up Deployment to that number.
 
-### Migrating an existing cluster safely (Phase 6 or earlier → Phase 7)
-
-**Don't just run `kubectl apply`.** On a Deployment that was created *with* `replicas: 2`, applying the manifest *without* that field makes kubectl delete it, and the Deployment falls back to **1 replica**. Instead: install metrics-server, create the HPA, update kubectl's record of the last applied configuration **without touching the live object**, then apply:
-
-```bash
-kubectl -n cloudops-bridge get deploy ticket-service
-kubectl apply -f kubernetes/metrics-server/components.yaml
-kubectl -n kube-system rollout status deployment/metrics-server --timeout=300s
-kubectl apply -f kubernetes/ticket-service/hpa.yaml
-kubectl apply set-last-applied -f kubernetes/ticket-service/deployment.yaml
-kubectl apply -f kubernetes/ticket-service/deployment.yaml
-kubectl apply -R -f kubernetes/
-kubectl -n monitoring rollout restart deployment/prometheus
-kubectl -n cloudops-bridge get deploy ticket-service
-```
-
-The first and last commands should both show `2/2`. Verified: `spec.replicas` stayed 2 and ready/available stayed 2/2 at every step, and the pods weren't restarted (same names and ages). The Prometheus restart loads the new scrape jobs.
-
-On a **fresh** cluster this isn't needed; section 4's `wait` covers the brief single-replica start.
+Upgrading a cluster that was created before the HPA existed? Follow the [appendix](#appendix-migrating-a-cluster-created-before-the-hpa) instead of a plain `kubectl apply`, or the Deployment drops to 1 replica.
 
 ### The traffic scenario
 
 `loadtest/ticket_sale.py` runs **inside the cluster** as a Kubernetes Job (`loadtest/ticket-sale-job.yaml`), using only the Python standard library. It lives **outside `kubernetes/`**, so `kubectl apply -R` never starts a load test.
 
-- **Profile:** normal **20 req/s** for 3 min, then an on-sale spike of **200 req/s** for 5 min, then recovery at **20 req/s** for 8 min. The recovery phase is long enough to show scale-down after the 300 s window.
+- **Profile:** normal **20 req/s** for 3 min, then an on-sale spike of **200 req/s** for 5 min, then recovery at **20 req/s** for 8 min. The load generator calls these three stages *phases* (`normal`, `spike`, `recovery`) in its output. The recovery phase is long enough to show scale-down after the 300 s window.
 - **Mix:** 95% `GET /tickets` (browsing) and 5% `POST /tickets/purchase {"quantity": 1}`. **No invalid requests are sent on purpose.**
 - **Open-loop with bounded concurrency:** requests are scheduled at the configured rate whatever the response times, and a fixed pool of 64 workers executes them. If every worker is busy when a request is due, it's counted as `skipped_generator_saturated` instead of silently lowering the load.
 - **A new connection per request,** so the Service spreads load and **new replicas receive traffic as soon as they're Ready**. Long-lived connections would stay stuck on the old pods.
@@ -496,11 +480,13 @@ kubectl -n cloudops-bridge get events --sort-by=.lastTimestamp | grep -E 'Succes
 kubectl -n cloudops-bridge describe hpa ticket-service
 ```
 
-In Grafana, the **Scaling (Phase 7: HPA)** row shows desired vs available replicas, per-pod CPU as % of request, and the HPA's own utilization ([monitoring/README.md, section 12](monitoring/README.md#12-scaling-metrics-and-dashboard-phase-7)). The rows above show request rate and status codes during the event.
+In Grafana, the **Scaling (Phase 7: HPA)** row shows desired vs available replicas, per-pod CPU as % of request, and the HPA's own utilization ([monitoring/README.md, section 12](monitoring/README.md#12-scaling-metrics-and-dashboard)). The rows above show request rate and status codes during the event.
 
 ### Measured results
 
 **Acceptance run** on a cluster rebuilt from scratch with only this README (2026-10-08, times in UTC):
+
+![Grafana Scaling row during the acceptance run](../docs/images/grafana-autoscaling.png)
 
 | Time | Event | Evidence |
 |---|---|---|
@@ -526,14 +512,14 @@ In Grafana, the **Scaling (Phase 7: HPA)** row shows desired vs available replic
 - **Grafana:** the Scaling row (range queries over the window) showed desired, current and available replicas going 2 → 6 → 2; per-pod CPU peaks of 189% and 196% of request; HPA utilization peaking at 247%; `/tickets` peaking at ~196 req/s; and **4xx and 5xx at 0** throughout.
 - **Alerts:** none fired; Alertmanager and the Bridge received nothing (see the scale-up note below).
 
-**Development run** (same profile, the previously migrated cluster): it scaled **2 → 6 in one step**, because its first HPA evaluation after the spike already saw 190% CPU, and back down 6 → 4 → 3 → 2. Also 0 failures in every phase, and 5,606 OK / 0 failed independently.
+**Development run** (same profile, on a cluster migrated as in the [appendix](#appendix-migrating-a-cluster-created-before-the-hpa)): it scaled **2 → 6 in one step**, because its first HPA evaluation after the spike already saw 190% CPU, and back down 6 → 4 → 3 → 2. Also 0 failures in every phase, and 5,606 OK / 0 failed independently.
 
 **Observations**
 - **Scale-up shape depends on timing,** not configuration: 2 → 6 in one run, 2 → 4 → 6 in the other, depending on how much spike traffic was in metrics-server's window at the HPA's first evaluation.
 - **Spike latency was lower than normal-load latency** (p95 3.9 ms vs 6.6 ms), even though each of the 6 pods handled *more* requests during the spike (~33 req/s) than each of the 2 pods at normal traffic (~10 req/s). **The cause wasn't investigated.** Plausible candidates are CPU power-state or scheduling effects at low request rates, in the services or in the load generator itself. This is a single measurement on shared hardware and shouldn't be read as a performance result.
 - **At 20 req/s on 2 pods, CPU sat at 57–70% of request,** close to the 70% target. That includes the independent checker's own ~4–5 req/s.
 - **Scale-down is gradual:** 6 → 4 → 3 → 2. Every pod adds ~7–8m of fixed probe and scrape CPU, so per-pod utilization doesn't fall in proportion, and each step needs the 300 s window of lower recommendations.
-- **A scale-up startup blip:** a brand-new pod (`hts4f`, from 2 → 4) was discovered by Prometheus as soon as it was `Running`, before uvicorn listened. One scrape failed (`up=0`), and `TicketServiceTargetDown` went **PENDING for ~15 s**, then cleared *before* its 15 s `for`. It never fired, so nothing reached Alertmanager or the Bridge. It's the same scrape-vs-readiness gap as in Phase 4, seen during scale-up.
+- **A scale-up startup blip:** a brand-new pod (`hts4f`, from 2 → 4) was discovered by Prometheus as soon as it was `Running`, before uvicorn listened. One scrape failed (`up=0`), and `TicketServiceTargetDown` went **PENDING for ~15 s**, then cleared *before* its 15 s `for`. It never fired, so nothing reached Alertmanager or the Bridge. It's the same scrape-vs-readiness gap shown in [monitoring/README.md, Test B](monitoring/README.md#test-b-an-unhealthy-target-shows-up0), seen during scale-up.
 - **Fresh-cluster start:** the Deployment (no `replicas`) started at **1**. In the **same second** the HPA logged `New size: 2; reason: Current number of replicas below Spec.MinReplicas`; it enforces the minimum even before metrics exist. For about 30 s it then reported `FailedGetResourceMetric` while metrics-server collected its first samples (`cpu: <unknown>/70%`).
 - **Inventory:** after the development run, the remaining pods showed 4,213 / 4,225 / 4,482 available (each its own). **Pods removed during scale-down took their sales history with them.** Per-pod numbers can't be summed into a real total.
 
@@ -571,7 +557,7 @@ Everything is declared in this repository. To rebuild, run sections 2–4 again.
 | Strategy | `maxUnavailable: 0`, `maxSurge: 1` | Never below 2 Ready pods; one extra pod at a time keeps the small local cluster light |
 | Readiness probe | `/ready`, delay 2 s, every 5 s, timeout 2 s, 2 failures | Pulls a bad pod out of traffic within ~10 s; tolerates one slow response |
 | Liveness probe | `/health`, delay 5 s, every 10 s, timeout 2 s, 3 failures | Restarts only after ~30 s of consecutive failure, so a brief stall doesn't cause a restart loop. Always slower than readiness |
-| Requests | 50m CPU, 64Mi memory | Each process uses about 34 MiB idle (measured). Requests decide scheduling, and HPA in a later phase computes utilization against them |
+| Requests | 50m CPU, 64Mi memory | Each process uses about 34 MiB idle (measured). Requests decide scheduling, and the HPA computes utilization against the CPU request (section 11) |
 | Limits | 500m CPU, 128Mi memory | Caps a runaway pod. Going over the memory limit means `OOMKilled`; going over the CPU limit means throttling, not killing |
 | `preStop` sleep | 5 s | Prevents dropped requests during rollouts (see Demo C) |
 | `terminationGracePeriodSeconds` | 15 | 5 s preStop + under 1 s uvicorn shutdown, with margin |
@@ -583,4 +569,24 @@ Everything is declared in this repository. To rebuild, run sections 2–4 again.
 | ConfigMaps, not Secrets | | The catalog and runbooks aren't secret |
 | Bridge `/ready` | | 200 only when the catalog is loaded. Keeps "restart me" (liveness) separate from "don't route to me" (readiness) |
 
-**Known limitation:** each ticket-service pod keeps its own in-memory inventory. With 2 or more replicas (and with autoscaling), purchases routed to different pods give different `available` counts; new replicas start with their own 5,000, and scaled-down pods take their sales with them. PostgreSQL (future phase) fixes this. It's a good example of why stateless pods need external state.
+**Known limitation:** each ticket-service pod keeps its own in-memory inventory. With 2 or more replicas (and with autoscaling), purchases routed to different pods give different `available` counts; new replicas start with their own 5,000, and scaled-down pods take their sales with them. Shared state such as PostgreSQL (not implemented) would fix this. It's a good example of why stateless pods need external state.
+
+## Appendix: migrating a cluster created before the HPA
+
+**Don't just run `kubectl apply`.** On a Deployment that was created *with* `replicas: 2`, applying the manifest *without* that field makes kubectl delete it, and the Deployment falls back to **1 replica**. Instead: install metrics-server, create the HPA, update kubectl's record of the last applied configuration **without touching the live object**, then apply:
+
+```bash
+kubectl -n cloudops-bridge get deploy ticket-service
+kubectl apply -f kubernetes/metrics-server/components.yaml
+kubectl -n kube-system rollout status deployment/metrics-server --timeout=300s
+kubectl apply -f kubernetes/ticket-service/hpa.yaml
+kubectl apply set-last-applied -f kubernetes/ticket-service/deployment.yaml
+kubectl apply -f kubernetes/ticket-service/deployment.yaml
+kubectl apply -R -f kubernetes/
+kubectl -n monitoring rollout restart deployment/prometheus
+kubectl -n cloudops-bridge get deploy ticket-service
+```
+
+The first and last commands should both show `2/2`. Verified: `spec.replicas` stayed 2 and ready/available stayed 2/2 at every step, and the pods weren't restarted (same names and ages). The Prometheus restart loads the new scrape jobs.
+
+On a **fresh** cluster this isn't needed; [section 4](#4-deploy)'s `wait` covers the brief single-replica start.

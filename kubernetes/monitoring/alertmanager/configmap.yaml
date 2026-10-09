@@ -9,7 +9,7 @@ metadata:
 data:
   alertmanager.yml: |
     # Alertmanager receives, groups and tracks alerts. ticket-api alerts are
-    # sent to CloudOps Bridge for enrichment (Phase 6); everything else goes to
+    # sent to CloudOps Bridge for enrichment; everything else goes to
     # a receiver with no integrations. No email, chat or paging.
     route:
       receiver: no-notifications

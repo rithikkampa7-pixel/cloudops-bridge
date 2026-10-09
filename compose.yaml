@@ -1,4 +1,5 @@
-# Local Docker Compose setup for Phase 2.
+# Local Docker Compose setup: runs the two applications only (no Kubernetes,
+# monitoring or autoscaling). The `:phase2` image tags are historical names.
 # Health checks are defined once, in each Dockerfile, and inherited here.
 # The two services do not call each other yet, so the default network is enough.
 

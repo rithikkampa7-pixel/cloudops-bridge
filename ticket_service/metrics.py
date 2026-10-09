@@ -1,8 +1,8 @@
 """Minimal metrics in the Prometheus text exposition format.
 
-No Prometheus server or client library is used in Phase 1. The output format
-is what Prometheus expects to scrape, so a later phase can point Prometheus at
-GET /metrics without changing this endpoint.
+No Prometheus client library is used: the output is written by hand in the
+text exposition format, which Prometheus scrapes from GET /metrics in the
+Kubernetes deployment (kubernetes/monitoring/).
 """
 
 import threading

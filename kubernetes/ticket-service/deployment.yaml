@@ -24,7 +24,7 @@ spec:
         app.kubernetes.io/name: ticket-service
         app.kubernetes.io/part-of: cloudops-bridge
     spec:
-      # uvicorn shuts down in under a second (measured in Phase 2).
+      # uvicorn shuts down in under a second (measured).
       terminationGracePeriodSeconds: 15
       securityContext:
         runAsNonRoot: true

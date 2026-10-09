@@ -1,4 +1,4 @@
-"""Static checks on the Phase 4 monitoring configuration.
+"""Static checks on the monitoring configuration.
 
 They catch mistakes that would otherwise only show up as an empty or
 misleading dashboard on a live cluster: discovery that no longer matches the
@@ -98,7 +98,7 @@ def test_prometheus_rbac_is_minimal_and_read_only():
     for binding in (docs["RoleBinding"], docs["ClusterRoleBinding"]):
         subject = binding["subjects"][0]
         assert (subject["name"], subject["namespace"]) == (sa, deployment["metadata"]["namespace"])
-    # The only cluster-scoped access (Phase 7, kubelet resource metrics):
+    # The only cluster-scoped access (kubelet resource metrics for scaling):
     # list/watch nodes and read node metrics. Never nodes/proxy, which would
     # also reach the kubelet's exec/logs API.
     assert docs["ClusterRole"]["rules"] == [

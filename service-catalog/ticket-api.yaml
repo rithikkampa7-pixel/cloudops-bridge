@@ -16,7 +16,7 @@ environments:
   - staging
 
 dependencies:
-  - postgresql   # planned; Phase 1 uses in-memory inventory
+  - postgresql   # planned; the service currently keeps inventory in memory
 
 endpoints:
   health: /health
@@ -55,7 +55,7 @@ alerts:
   TicketServiceTargetDown:
     summary: Prometheus cannot scrape a ticket-api pod (hung, restarting, or unreachable).
     severity:
-      production: warning   # one replica affected; the other keeps serving
+      production: warning   # one replica affected; the others keep serving
       staging: info
     # Platform signal first: is the pod hung, restarting, or unreachable?
     first_responder: cloudops

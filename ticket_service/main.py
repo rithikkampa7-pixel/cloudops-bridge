@@ -52,8 +52,8 @@ def health():
 
 @app.get("/ready")
 def ready():
-    """Readiness: can this instance serve traffic? In Phase 1 the only
-    dependency is the in-memory inventory, which is always loaded."""
+    """Readiness: can this instance serve traffic? The only dependency is
+    the in-memory inventory, which is always loaded."""
     return {"status": "ready"}
 
 

@@ -1,4 +1,4 @@
-"""Phase 7: HPA, metrics-server, kube-state-metrics and the load generator."""
+"""Autoscaling: HPA, metrics-server, kube-state-metrics and the load generator."""
 
 import hashlib
 import importlib.util
