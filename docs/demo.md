@@ -75,7 +75,9 @@ Run this within 2 hours of the Job finishing: Kubernetes deletes the Job and its
 
 This uses the end-to-end procedure in [kubernetes/monitoring/README.md, section 11](../kubernetes/monitoring/README.md#11-incident-enrichment-alertmanager--cloudops-bridge). It deliberately freezes one ticket-service process; Kubernetes restarts it on its own.
 
-> This procedure was verified three times **before** the HPA was added, and hasn't been re-run with the HPA in place.
+> This procedure was verified three times before the HPA was added, and again with the HPA enabled, on a cluster rebuilt from a fresh clone using the [Quick start](../README.md#quick-start-kind). In that run (2 replicas, HPA active throughout), `TicketServiceTargetDown` fired about 45 s after the freeze. Alertmanager's webhook reached the Bridge at about 52 s, and the Bridge logged `outcome=enriched` with the owners, first responder, dependency, runbook and 6 suggested checks. The resolved webhook arrived 60 s later with the same fingerprint, and Alertmanager recorded 0 failed webhook deliveries.
+>
+> With the HPA in place, a pod that is being removed during a scale-down can also trigger a short `TicketServiceTargetDown` (the terminating-pod case described in [kubernetes/monitoring/README.md](../kubernetes/monitoring/README.md#observations-from-testing)). That was observed once during verification; it was delivered and enriched like any other alert.
 
 What to look at:
 

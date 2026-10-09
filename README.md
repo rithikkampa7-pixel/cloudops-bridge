@@ -10,6 +10,30 @@ A bare alert such as *"TicketServiceTargetDown on ticket-api in production"* tel
 
 *Grafana during the measured on-sale spike: the HPA scaled ticket-service from 2 to 6 replicas (its configured maximum) and back to 2. Real data from the acceptance run, 22:44–23:10 UTC.*
 
+## CloudOps Bridge in 60 seconds
+
+- **A sample ticketing application runs on Kubernetes.** Customers can browse and buy tickets through a small web API.
+- **It grows with demand.** When many customers arrive at once, Kubernetes automatically starts more copies (pods) of the application, and removes them when traffic drops.
+- **Problems are detected automatically.** Monitoring checks every copy of the application and raises an alert when one stops responding.
+- **Alerts arrive with context.** CloudOps Bridge adds what the on-call engineer needs first: the responsible team, who responds first, what the service depends on, which runbook to open and what to check.
+
+### What was verified
+
+These results come from a **local Kubernetes demonstration on a single laptop**, not from a production environment. They show how the system behaves, not production capacity.
+
+- **60,000 requests with zero failures** during a simulated ticket-sale spike (200 requests per second for five minutes), in the measured run.
+- **Automatic scaling from 2 to 6 pods and back to 2** in the same run, without manual intervention.
+- **A real service failure became an enriched incident.** A stopped application process triggered a real alert, which CloudOps Bridge enriched with incident information, followed by a resolved notification when Kubernetes recovered the pod.
+
+### See it working
+
+- [Grafana: autoscaling](docs/images/grafana-autoscaling.png): replicas, CPU per pod and the HPA target during the spike
+- [Grafana: traffic and errors](docs/images/grafana-traffic-errors.png): request rate and status codes, with no errors
+- [Grafana: full dashboard](docs/images/grafana-full-dashboard.png)
+- [Real incident-enrichment example](#example-enriched-incident-real-values-from-the-rebuilt-cluster-run)
+- [Architecture diagram](#architecture)
+- [Demo walkthrough](docs/demo.md)
+
 ## The problem
 
 On-call engineers lose the first minutes of an incident answering the same questions: which service, which environment, who owns it, what it depends on, where the runbook is, what to check first. CloudOps Bridge answers them from a **service catalog**, one YAML file per service that the Development and CloudOps teams agree on as their operational handoff. The knowledge lives in version control instead of in someone's head.
@@ -87,7 +111,7 @@ Full method, timeline, per-stage numbers and findings: [kubernetes/README.md, se
 
 When Prometheus detects an unavailable ticket-service target, Alertmanager sends a real webhook to CloudOps Bridge, which maps stable alert labels to operational context from the service catalog and runbooks.
 
-Verified live three times, once on a freshly rebuilt cluster, by freezing one ticket-service process:
+Verified live multiple times, including with HPA enabled, by freezing one ticket-service process:
 
 - Prometheus fired `TicketServiceTargetDown`, and Alertmanager's own webhook reached the Bridge about 9 s after Alertmanager received the alert (its `group_wait`). The Bridge logged `outcome=enriched` with the full context.
 - After Kubernetes restarted the pod, the **resolved** webhook arrived 60 s after the firing one (`group_interval`), with the same alert fingerprint.
