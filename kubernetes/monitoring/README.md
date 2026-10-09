@@ -382,6 +382,8 @@ kubectl apply -R -f kubernetes/
 kubectl -n monitoring rollout restart deployment/grafana
 ```
 
+If Argo CD manages ticket-service, don't use the `apply -R` line above. Apply only `kubernetes/monitoring/grafana/` instead ([why](../../gitops/README.md#ownership-before-and-after-adoption)).
+
 Changing `prometheus.yml` needs `kubectl -n monitoring rollout restart deployment/prometheus`, which also clears its history.
 
 ## 10. Alerting

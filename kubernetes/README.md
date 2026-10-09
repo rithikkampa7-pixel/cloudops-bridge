@@ -4,6 +4,8 @@ This guide runs the whole stack (both services, monitoring, alerting, incident e
 
 > Every code block contains only commands (no `#` comments), so blocks paste cleanly into zsh. Run commands from the repository root, `~/cloudops-bridge`.
 
+> **Clusters where Argo CD manages ticket-service** ([gitops/README.md](../gitops/README.md)): the `kubectl apply -R -f kubernetes/` commands and the imperative ticket-service changes in this guide (sections 8, 10 and the appendix) apply only *before* adoption. After adoption, change ticket-service through Git and Argo CD, and apply other components file by file ([why](../gitops/README.md#ownership-before-and-after-adoption)).
+
 ```
 kubernetes/
 ├── namespace.yaml                     namespace cloudops-bridge

@@ -1,6 +1,6 @@
 # GitOps with Argo CD (Phase 8, in progress)
 
-> **Status:** configuration and validation only. Nothing in this folder has been deployed to a cluster yet, so no live behavior is claimed here. Results will be added once they have been measured.
+> **Status:** in progress. Installing Argo CD and adopting ticket-service have been run on a local kind cluster. The other demonstrations haven't been run yet, so no other live behavior is claimed here. Results will be added once they have been measured.
 
 Argo CD makes Git the desired state for **ticket-service**. It compares `kubernetes/ticket-service/` on the `phase8-gitops` branch with what is running in the cluster, reports any difference as **OutOfSync**, and applies Git's version when someone syncs. Its health and sync status show whether the last deployment succeeded.
 
@@ -13,9 +13,23 @@ This is a **local demonstration** on the same single-node kind cluster as the re
 | **Argo CD** (Application `ticket-service`) | `kubernetes/ticket-service/`: Deployment, Service, HorizontalPodAutoscaler |
 | `kubectl apply` (README Quick start) | Namespaces, Bridge, generated ConfigMaps, monitoring, metrics-server |
 
-Only ticket-service is managed by Argo CD, to keep the change small and easy to review. Once Argo CD manages it, change ticket-service **through Git only**: a `kubectl` edit is drift that Argo CD will report.
+Only ticket-service is managed by Argo CD, to keep the change small and easy to review. This folder sits outside `kubernetes/` so the Quick start's `kubectl apply -R -f kubernetes/` never applies Argo CD objects.
 
-The Quick start's `kubectl apply -R -f kubernetes/` still applies `kubernetes/ticket-service/` too. Both apply the same files from the same commit, so they agree. This folder sits outside `kubernetes/` so that command never applies Argo CD objects.
+## Ownership before and after adoption
+
+**Before adoption,** the README Quick start creates every resource, including ticket-service, with `kubectl apply -R -f kubernetes/`. That is how a new cluster is built.
+
+**After adoption** (once the Application has been synced), ticket-service is GitOps-managed. On an adopted cluster:
+
+- **Don't rerun `kubectl apply -R -f kubernetes/`.**
+- **Don't `kubectl apply` any file under `kubernetes/ticket-service/` directly.**
+- Change ticket-service's desired state only like this: **edit in Git → commit → push → Argo CD compares → Argo CD syncs**.
+
+**Why:** the HPA owns `spec.replicas`, and the Application tells Argo CD to ignore that field (`ignoreDifferences` plus `RespectIgnoreDifferences=true`). To leave the field alone during a sync, Argo CD applies the Git manifest with the **live** replica count filled in. That value is then recorded in kubectl's `kubectl.kubernetes.io/last-applied-configuration` annotation. A later plain `kubectl apply` of the Git file, which has no `replicas`, sees the field as removed and deletes it. The Deployment then falls back to 1 replica until the HPA raises it again.
+
+During adoption, the sync wrote `"replicas":2` into that annotation. A server-side dry run of `kubectl apply -f kubernetes/ticket-service/deployment.yaml` then returned `spec.replicas=1`; the live Deployment wasn't changed. This is the expected result of mixing two ways of applying the same object (kubectl's three-way merge and Argo CD's handling of ignored fields), not an Argo CD bug. The fix is to give ticket-service a single owner.
+
+The other resources (Bridge, ConfigMaps, monitoring, metrics-server) aren't managed by Argo CD and are still applied with `kubectl`. To apply a change to one of them on an adopted cluster, apply that file or folder only (for example `kubectl apply -f kubernetes/monitoring/grafana/`), never all of `kubernetes/`.
 
 ## Files
 
