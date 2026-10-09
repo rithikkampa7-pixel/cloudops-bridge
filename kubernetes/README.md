@@ -7,7 +7,9 @@ Phase 3 runs both services on a local, single-node [kind](https://kind.sigs.k8s.
 ```
 kubernetes/
 ├── namespace.yaml                     namespace cloudops-bridge
-├── ticket-service/deployment.yaml     2 replicas, probes, resources, securityContext
+├── ticket-service/deployment.yaml     probes, resources, securityContext (replicas owned by the HPA)
+├── ticket-service/hpa.yaml            HorizontalPodAutoscaler: 2–6 replicas at 70% CPU (Phase 7)
+├── metrics-server/components.yaml     vendored metrics-server v0.9.0 (Phase 7)
 ├── ticket-service/service.yaml        ClusterIP :8080
 ├── bridge/deployment.yaml             same, plus read-only ConfigMap mounts
 ├── bridge/service.yaml                ClusterIP :8081
@@ -79,9 +81,15 @@ kubectl -n cloudops-bridge rollout status deployment/bridge --timeout=120s
 kubectl -n monitoring rollout status deployment/prometheus --timeout=300s
 kubectl -n monitoring rollout status deployment/grafana --timeout=300s
 kubectl -n monitoring rollout status deployment/alertmanager --timeout=300s
+kubectl -n kube-system rollout status deployment/metrics-server --timeout=300s
+kubectl -n monitoring rollout status deployment/kube-state-metrics --timeout=300s
+kubectl -n cloudops-bridge wait --for=jsonpath='{.status.readyReplicas}'=2 deployment/ticket-service --timeout=300s
+kubectl -n cloudops-bridge get hpa ticket-service
 ```
 
-The first deploy pulls the Prometheus, Grafana and Alertmanager images from Docker Hub, which can take a minute.
+The first deploy pulls the Prometheus, Grafana and Alertmanager images from Docker Hub, and metrics-server and kube-state-metrics from registry.k8s.io, which can take a minute.
+
+**Why the extra `wait`:** since Phase 7, the ticket-service Deployment has **no `replicas` field**, because the HorizontalPodAutoscaler owns the count (minimum 2). On a fresh cluster Kubernetes therefore starts it with **1** replica, and the HPA raises it to 2. `rollout status` returns as soon as that first pod is Ready, so the last `wait` makes sure **two** pods are Ready before you test anything. The final command should show `cpu: <n>%/70%`. If it shows `<unknown>/70%`, metrics-server is still collecting its first samples; check again after a minute. See [section 11](#11-autoscaling-hpa-phase-7).
 
 ## 5. Inspect
 
@@ -402,7 +410,143 @@ kubectl -n cloudops-bridge rollout status deployment/bridge
 
 Alertmanager reads its configuration only at startup too. After changing `kubernetes/monitoring/alertmanager/configmap.yaml`, apply it and restart with `kubectl -n monitoring rollout restart deployment/alertmanager`.
 
-## 11. Cleanup and rebuild from scratch
+## 11. Autoscaling (HPA, Phase 7)
+
+> A **local** autoscaling demonstration on one kind node. It shows how Kubernetes reacts to a real traffic spike; it says nothing about production capacity or performance.
+
+### How it works
+
+- **metrics-server** (`kubernetes/metrics-server/components.yaml`, pinned v0.9.0, vendored) reads each pod's CPU from the kubelet every 15 s and serves it through the `metrics.k8s.io` API. That's what `kubectl top` and the HPA use. Its one change from upstream, `--kubelet-insecure-tls`, is needed **only on kind**, where kubelet certificates aren't signed by the cluster CA. It means metrics-server doesn't verify the kubelet's identity; production clusters sign kubelet serving certificates instead. A test confirms this is the only change from upstream.
+- **The HorizontalPodAutoscaler** (`ticket-service/hpa.yaml`) keeps ticket-service between **2 and 6 replicas** at **70% average CPU utilization**.
+- **Utilization is relative to the CPU request.** Utilization = CPU usage ÷ CPU **request** (50m), averaged over Ready pods. So 70% means about 35m per pod, and the request decides what "busy" means: too high and real load is hidden, too low and the service scales constantly. 50m sits above the measured idle usage (7–8m) and the normal-traffic usage (~30m).
+- **The HPA loop** runs every 15 s: `desired = ceil(current replicas × current utilization / 70)`, ignoring differences within 10%.
+  - **Scale-up** is immediate: up to double, or +4 pods, per 15 s, whichever is more.
+  - **Scale-down** happens only after **300 s** of lower recommendations, so a brief dip doesn't remove capacity.
+  - These are Kubernetes' default values, written out in the manifest so they're visible.
+- **Replicas belong to the HPA.** The Deployment has **no `replicas` field**; otherwise every `kubectl apply` would reset a scaled-up Deployment to that number.
+
+### Migrating an existing cluster safely (Phase 6 or earlier → Phase 7)
+
+**Don't just run `kubectl apply`.** On a Deployment that was created *with* `replicas: 2`, applying the manifest *without* that field makes kubectl delete it, and the Deployment falls back to **1 replica**. Instead: install metrics-server, create the HPA, update kubectl's record of the last applied configuration **without touching the live object**, then apply:
+
+```bash
+kubectl -n cloudops-bridge get deploy ticket-service
+kubectl apply -f kubernetes/metrics-server/components.yaml
+kubectl -n kube-system rollout status deployment/metrics-server --timeout=300s
+kubectl apply -f kubernetes/ticket-service/hpa.yaml
+kubectl apply set-last-applied -f kubernetes/ticket-service/deployment.yaml
+kubectl apply -f kubernetes/ticket-service/deployment.yaml
+kubectl apply -R -f kubernetes/
+kubectl -n monitoring rollout restart deployment/prometheus
+kubectl -n cloudops-bridge get deploy ticket-service
+```
+
+The first and last commands should both show `2/2`. Verified: `spec.replicas` stayed 2 and ready/available stayed 2/2 at every step, and the pods weren't restarted (same names and ages). The Prometheus restart loads the new scrape jobs.
+
+On a **fresh** cluster this isn't needed; section 4's `wait` covers the brief single-replica start.
+
+### The traffic scenario
+
+`loadtest/ticket_sale.py` runs **inside the cluster** as a Kubernetes Job (`loadtest/ticket-sale-job.yaml`), using only the Python standard library. It lives **outside `kubernetes/`**, so `kubectl apply -R` never starts a load test.
+
+- **Profile:** normal **20 req/s** for 3 min, then an on-sale spike of **200 req/s** for 5 min, then recovery at **20 req/s** for 8 min. The recovery phase is long enough to show scale-down after the 300 s window.
+- **Mix:** 95% `GET /tickets` (browsing) and 5% `POST /tickets/purchase {"quantity": 1}`. **No invalid requests are sent on purpose.**
+- **Open-loop with bounded concurrency:** requests are scheduled at the configured rate whatever the response times, and a fixed pool of 64 workers executes them. If every worker is busy when a request is due, it's counted as `skipped_generator_saturated` instead of silently lowering the load.
+- **A new connection per request,** so the Service spreads load and **new replicas receive traffic as soon as they're Ready**. Long-lived connections would stay stuck on the old pods.
+- **Reports:** every 10 s and per phase, the **achieved** req/s, OK count, failures by type (`http_<code>`, `timeout`, `connection_error`), and p95 latency. The Job fails if anything failed or was skipped.
+
+**Inventory limitation (not hidden):** each replica keeps its **own** in-memory inventory of 5,000 tickets. **Scaling up therefore creates a fresh 5,000 tickets in every new pod**, which is wrong for a real ticket shop and exactly why shared state (PostgreSQL) is planned. Purchases are kept at 5% × 1 ticket so no pod sells out during the test (an earlier unpaced probe sold out both pods within seconds). Results are reported per pod, never as a global inventory.
+
+### Run it
+
+Check that 2 replicas are Ready, both pods have tickets, and no alerts are active:
+
+```bash
+kubectl -n cloudops-bridge get hpa,deploy ticket-service
+python3 kubernetes/tools/promql.py 'tickets_available{job="ticket-service"}'
+curl -s 'localhost:19093/api/v2/alerts?active=true'
+```
+
+Tab 2, the scaling timeline (HPA current/desired, its CPU %, Ready replicas, per-pod CPU from the metrics API), every 5 s for 20 minutes:
+
+```bash
+python3 kubernetes/tools/scale_watch.py 1200 5
+```
+
+Tab 3, independent availability, separate from the load generator. Note that it adds ~4–5 req/s of `GET /tickets` itself:
+
+```bash
+kubectl -n cloudops-bridge exec -i deploy/bridge -- python - http://ticket-service:8080/tickets 1150 < kubernetes/tools/check_availability.py
+```
+
+Tab 1, start the load and follow its reports:
+
+```bash
+kubectl apply -f loadtest/loadgen-configmap.yaml
+kubectl -n cloudops-bridge delete job ticket-sale --ignore-not-found
+kubectl create -f loadtest/ticket-sale-job.yaml
+kubectl -n cloudops-bridge wait --for=condition=Ready pod -l job-name=ticket-sale --timeout=120s
+kubectl -n cloudops-bridge logs -f job/ticket-sale
+```
+
+The scaling decisions afterwards:
+
+```bash
+kubectl -n cloudops-bridge get events --sort-by=.lastTimestamp | grep -E 'SuccessfulRescale|ScalingReplicaSet'
+kubectl -n cloudops-bridge describe hpa ticket-service
+```
+
+In Grafana, the **Scaling (Phase 7: HPA)** row shows desired vs available replicas, per-pod CPU as % of request, and the HPA's own utilization ([monitoring/README.md, section 12](monitoring/README.md#12-scaling-metrics-and-dashboard-phase-7)). The rows above show request rate and status codes during the event.
+
+### Measured results
+
+**Acceptance run** on a cluster rebuilt from scratch with only this README (2026-10-08, times in UTC):
+
+| Time | Event | Evidence |
+|---|---|---|
+| 22:45:27 | Load starts at 20 req/s. HPA at 2 replicas, CPU 57–70%/70% (within the 10% tolerance, so no action) | `scale_watch` |
+| ~22:48:27 | **Spike starts: 200 req/s** | load generator |
+| 22:48:51 (+24 s) | `SuccessfulRescale New size: 4; reason: cpu resource utilization (percentage of request) above target`. The HPA saw **111%**: its 15 s window was still filling with spike traffic | events, `scale_watch` |
+| 22:49:02 | 4 pods Ready | `scale_watch` |
+| 22:49:06 (+39 s) | `New size: 6`. The HPA now saw **247%**; 6 is `maxReplicas` | events |
+| 22:49:18 (+51 s) | **6 pods Ready**; per-pod CPU settles at ~95–105% of request (above target, but the maximum is reached) | `scale_watch`, Grafana |
+| ~22:53:27 | Spike ends; HPA CPU drops to ~30% within ~45 s | `scale_watch` |
+| 22:58:53 | `New size: 4; reason: All metrics below target` (~5.5 min after the spike: the 300 s window) | events |
+| 22:59:53 | `New size: 3` | events |
+| 23:01:29 | Load generator finishes (recovery phase ends) | load generator |
+| 23:06:24 | `New size: 2` (back to `minReplicas`) | events |
+
+| Phase | Configured | **Achieved** | Requests | Failed | Timeouts / connection errors | Skipped (generator saturated) | p95 |
+|---|---|---|---|---|---|---|---|
+| normal (3 min) | 20 req/s | **20.0 req/s** | 3,600 | **0** | 0 / 0 | 0 | 6.6 ms |
+| spike (5 min) | 200 req/s | **200.0 req/s** | 60,000 | **0** | 0 / 0 | 0 | 3.9 ms |
+| recovery (8 min) | 20 req/s | **20.0 req/s** | 9,600 | **0** | 0 / 0 | 0 | 7.7 ms |
+
+- **Independent availability**, measured by a separate checker over the whole 2,100 s including every scale-down: **10,197 OK, 0 failed**.
+- **Grafana:** the Scaling row (range queries over the window) showed desired, current and available replicas going 2 → 6 → 2; per-pod CPU peaks of 189% and 196% of request; HPA utilization peaking at 247%; `/tickets` peaking at ~196 req/s; and **4xx and 5xx at 0** throughout.
+- **Alerts:** none fired; Alertmanager and the Bridge received nothing (see the scale-up note below).
+
+**Development run** (same profile, the previously migrated cluster): it scaled **2 → 6 in one step**, because its first HPA evaluation after the spike already saw 190% CPU, and back down 6 → 4 → 3 → 2. Also 0 failures in every phase, and 5,606 OK / 0 failed independently.
+
+**Observations**
+- **Scale-up shape depends on timing,** not configuration: 2 → 6 in one run, 2 → 4 → 6 in the other, depending on how much spike traffic was in metrics-server's window at the HPA's first evaluation.
+- **Spike latency was lower than normal-load latency** (p95 3.9 ms vs 6.6 ms), even though each of the 6 pods handled *more* requests during the spike (~33 req/s) than each of the 2 pods at normal traffic (~10 req/s). **The cause wasn't investigated.** Plausible candidates are CPU power-state or scheduling effects at low request rates, in the services or in the load generator itself. This is a single measurement on shared hardware and shouldn't be read as a performance result.
+- **At 20 req/s on 2 pods, CPU sat at 57–70% of request,** close to the 70% target. That includes the independent checker's own ~4–5 req/s.
+- **Scale-down is gradual:** 6 → 4 → 3 → 2. Every pod adds ~7–8m of fixed probe and scrape CPU, so per-pod utilization doesn't fall in proportion, and each step needs the 300 s window of lower recommendations.
+- **A scale-up startup blip:** a brand-new pod (`hts4f`, from 2 → 4) was discovered by Prometheus as soon as it was `Running`, before uvicorn listened. One scrape failed (`up=0`), and `TicketServiceTargetDown` went **PENDING for ~15 s**, then cleared *before* its 15 s `for`. It never fired, so nothing reached Alertmanager or the Bridge. It's the same scrape-vs-readiness gap as in Phase 4, seen during scale-up.
+- **Fresh-cluster start:** the Deployment (no `replicas`) started at **1**. In the **same second** the HPA logged `New size: 2; reason: Current number of replicas below Spec.MinReplicas`; it enforces the minimum even before metrics exist. For about 30 s it then reported `FailedGetResourceMetric` while metrics-server collected its first samples (`cpu: <unknown>/70%`).
+- **Inventory:** after the development run, the remaining pods showed 4,213 / 4,225 / 4,482 available (each its own). **Pods removed during scale-down took their sales history with them.** Per-pod numbers can't be summed into a real total.
+
+### Limitations
+
+- **One node, one laptop:** all replicas share the same 8 CPUs, also used by Docker Desktop and other containers. Results show Kubernetes behavior, **not production capacity**.
+- **Ceiling reached:** during the spike, 6 replicas (the maximum) still ran above the 70% target (~95–105%). A larger spike would be limited by `maxReplicas` and by each pod's 500m CPU limit, with throttling and rising latency.
+- **Insecure kubelet TLS on kind** for both metrics-server (`--kubelet-insecure-tls`) and Prometheus (`insecure_skip_verify`).
+- **In-memory inventory**, as described above.
+- **The load generator sends a new connection per request** on purpose (so load spreads to new pods). Clients with long-lived connections would keep hitting the old pods.
+- **`kubectl apply` reports `deployment.apps/metrics-server configured` on every run**, even though nothing changes (its `resourceVersion` and `generation` stay the same). It's cosmetic, and the vendored upstream file is deliberately left unmodified.
+
+## 12. Cleanup and rebuild from scratch
 
 Remove only the application:
 
@@ -423,7 +567,7 @@ Everything is declared in this repository. To rebuild, run sections 2–4 again.
 
 | Setting | Value | Why |
 |---|---|---|
-| Replicas | 2 | Survives one pod failing; makes rollouts and reconciliation visible |
+| Replicas | 2–6, owned by the HPA (min 2) | Min 2 survives one pod failing and makes rollouts and reconciliation visible; the HPA adds pods under CPU load (section 11). The bridge stays at a fixed 2 |
 | Strategy | `maxUnavailable: 0`, `maxSurge: 1` | Never below 2 Ready pods; one extra pod at a time keeps the small local cluster light |
 | Readiness probe | `/ready`, delay 2 s, every 5 s, timeout 2 s, 2 failures | Pulls a bad pod out of traffic within ~10 s; tolerates one slow response |
 | Liveness probe | `/health`, delay 5 s, every 10 s, timeout 2 s, 3 failures | Restarts only after ~30 s of consecutive failure, so a brief stall doesn't cause a restart loop. Always slower than readiness |
@@ -439,4 +583,4 @@ Everything is declared in this repository. To rebuild, run sections 2–4 again.
 | ConfigMaps, not Secrets | | The catalog and runbooks aren't secret |
 | Bridge `/ready` | | 200 only when the catalog is loaded. Keeps "restart me" (liveness) separate from "don't route to me" (readiness) |
 
-**Known limitation:** each ticket-service pod keeps its own in-memory inventory. With 2 replicas, purchases routed to different pods give different `available` counts. PostgreSQL (future phase) fixes this. It's a good example of why stateless pods need external state.
+**Known limitation:** each ticket-service pod keeps its own in-memory inventory. With 2 or more replicas (and with autoscaling), purchases routed to different pods give different `available` counts; new replicas start with their own 5,000, and scaled-down pods take their sales with them. PostgreSQL (future phase) fixes this. It's a good example of why stateless pods need external state.

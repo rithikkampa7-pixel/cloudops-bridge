@@ -4,6 +4,7 @@
 #   service-catalog/*.yaml  ->  kubernetes/config/service-catalog-configmap.yaml
 #   runbooks/*.md           ->  kubernetes/config/runbooks-configmap.yaml
 #   dashboards/*.json       ->  kubernetes/monitoring/grafana/dashboard-configmap.yaml
+#   loadtest/*.py           ->  loadtest/loadgen-configmap.yaml
 #
 # Never edit the generated files by hand. tests/test_kubernetes_config.py fails
 # if they drift from the sources. Run from anywhere:
@@ -32,3 +33,4 @@ generate() {
 generate cloudops-bridge service-catalog    "$ROOT/service-catalog" "*.yaml" "$ROOT/kubernetes/config/service-catalog-configmap.yaml"
 generate cloudops-bridge runbooks           "$ROOT/runbooks"        "*.md"   "$ROOT/kubernetes/config/runbooks-configmap.yaml"
 generate monitoring      grafana-dashboards "$ROOT/dashboards"      "*.json" "$ROOT/kubernetes/monitoring/grafana/dashboard-configmap.yaml"
+generate cloudops-bridge loadgen-script      "$ROOT/loadtest"        "*.py"   "$ROOT/loadtest/loadgen-configmap.yaml"

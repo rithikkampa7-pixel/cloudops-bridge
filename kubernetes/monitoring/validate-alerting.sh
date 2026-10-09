@@ -36,6 +36,10 @@ extract "$MON/prometheus/rules-configmap.yaml" ticket-service.yml "$WORK/etc/pro
 extract "$MON/alertmanager/configmap.yaml" alertmanager.yml "$WORK/etc/alertmanager/alertmanager.yml"
 cp "$WORK/etc/prometheus-rules/ticket-service.yml" "$WORK/tests/"
 cp "$ROOT"/tests/prometheus/*.test.yml "$WORK/tests/"
+# promtool checks that the kubelet job's service-account token file exists.
+# In the cluster Kubernetes mounts the real one; for this offline syntax check
+# an empty placeholder is mounted at the same path (no credential involved).
+: > "$WORK/token-placeholder"
 
 run() {
   local image="$1" tool="$2"; shift 2
@@ -43,6 +47,7 @@ run() {
     -v "$WORK/etc/prometheus-rules:/etc/prometheus-rules:ro" \
     -v "$WORK/etc/alertmanager:/etc/alertmanager:ro" \
     -v "$WORK/tests:/tests:ro" -w /tests \
+    -v "$WORK/token-placeholder:/var/run/secrets/kubernetes.io/serviceaccount/token:ro" \
     --entrypoint "/bin/$tool" "$image" "$@"
 }
 

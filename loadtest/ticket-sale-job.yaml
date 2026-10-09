@@ -1,0 +1,65 @@
+# Ticket on-sale load test: normal 20 req/s (3 min) -> spike 200 req/s (5 min)
+# -> recovery 20 req/s (8 min). Kept outside kubernetes/ so `kubectl apply -R
+# -f kubernetes/` never starts a load test. Run it explicitly:
+#   kubectl apply -f loadtest/loadgen-configmap.yaml
+#   kubectl -n cloudops-bridge delete job ticket-sale --ignore-not-found
+#   kubectl create -f loadtest/ticket-sale-job.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ticket-sale
+  namespace: cloudops-bridge
+  labels:
+    app.kubernetes.io/name: loadgen
+    app.kubernetes.io/part-of: cloudops-bridge
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 1500
+  ttlSecondsAfterFinished: 7200
+  template:
+    metadata:
+      # Deliberately NOT ticket-service: Prometheus discovery, the Service and
+      # the HPA must not mistake the load generator for an application pod.
+      labels:
+        app.kubernetes.io/name: loadgen
+        app.kubernetes.io/part-of: cloudops-bridge
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: loadgen
+          # Reuses the ticket-service image only for its Python interpreter.
+          image: cloudops-bridge-ticket-service:phase3
+          imagePullPolicy: Never
+          command: ["python", "/loadtest/ticket_sale.py"]
+          args:
+            - --base-url=http://ticket-service:8080
+            - --profile=normal:20:180,spike:200:300,recovery:20:480
+            - --buy-ratio=0.05
+            - --workers=64
+            - --seed=7
+          resources:
+            requests:
+              cpu: 200m
+              memory: 64Mi
+            limits:
+              cpu: "1"
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: script
+              mountPath: /loadtest
+              readOnly: true
+      volumes:
+        - name: script
+          configMap:
+            name: loadgen-script

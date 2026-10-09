@@ -60,3 +60,35 @@ data:
             target_label: namespace
           - source_labels: [__meta_kubernetes_pod_name]
             target_label: pod
+
+      # Per-pod CPU and memory from each node's kubelet (/metrics/resource,
+      # the same data metrics-server reads). Needs the ClusterRole in
+      # rbac.yaml: nodes list/watch (discovery) + nodes/metrics get.
+      # Only two metrics for namespace cloudops-bridge are KEPT; note that
+      # this filter limits what is stored, not what the kubelet would let
+      # Prometheus read - the permission covers all pods on the node.
+      - job_name: kubelet-resource
+        scheme: https
+        metrics_path: /metrics/resource
+        authorization:
+          credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        tls_config:
+          # LOCAL KIND ONLY: kind's kubelet serving certificates are not signed
+          # by the cluster CA. Production: verify against the cluster CA.
+          insecure_skip_verify: true
+        kubernetes_sd_configs:
+          - role: node
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_node_name]
+            target_label: node
+        metric_relabel_configs:
+          - source_labels: [__name__, namespace]
+            regex: (container_cpu_usage_seconds_total|container_memory_working_set_bytes);cloudops-bridge
+            action: keep
+
+      # Kubernetes object state (HPA desired/current replicas, Deployment
+      # available replicas, pod CPU requests) for namespace cloudops-bridge.
+      - job_name: kube-state-metrics
+        honor_labels: true
+        static_configs:
+          - targets: ["kube-state-metrics.monitoring.svc:8080"]

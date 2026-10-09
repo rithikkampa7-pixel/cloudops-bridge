@@ -540,6 +540,313 @@ data:
               "sort": "desc"
             }
           }
+        },
+        {
+          "id": 13,
+          "type": "row",
+          "title": "Scaling (Phase 7: HPA)",
+          "collapsed": false,
+          "gridPos": {
+            "x": 0,
+            "y": 29,
+            "w": 24,
+            "h": 1
+          },
+          "panels": []
+        },
+        {
+          "id": 10,
+          "type": "timeseries",
+          "title": "Replicas: HPA desired vs current vs available",
+          "description": "From kube-state-metrics. 'HPA desired' is what the autoscaler wants; 'HPA current' what it last saw; 'Deployment available' how many pods are Ready and serving. A gap between desired and available is pods still starting. min/max are the HPA bounds (dashed).",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 30,
+            "w": 12,
+            "h": 9
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "kube_horizontalpodautoscaler_status_desired_replicas{namespace=\"cloudops-bridge\",horizontalpodautoscaler=\"ticket-service\"}",
+              "legendFormat": "HPA desired",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "kube_horizontalpodautoscaler_status_current_replicas{namespace=\"cloudops-bridge\",horizontalpodautoscaler=\"ticket-service\"}",
+              "legendFormat": "HPA current",
+              "refId": "B"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "kube_deployment_status_replicas_available{namespace=\"cloudops-bridge\",deployment=\"ticket-service\"}",
+              "legendFormat": "Deployment available (Ready)",
+              "refId": "C"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "kube_horizontalpodautoscaler_spec_max_replicas{namespace=\"cloudops-bridge\",horizontalpodautoscaler=\"ticket-service\"}",
+              "legendFormat": "max",
+              "refId": "D"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "kube_horizontalpodautoscaler_spec_min_replicas{namespace=\"cloudops-bridge\",horizontalpodautoscaler=\"ticket-service\"}",
+              "legendFormat": "min",
+              "refId": "E"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 0,
+                "showPoints": "never",
+                "spanNulls": false
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "max"
+                },
+                "properties": [
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "fill": "dash",
+                      "dash": [
+                        10,
+                        10
+                      ]
+                    }
+                  },
+                  {
+                    "id": "custom.lineWidth",
+                    "value": 1
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "min"
+                },
+                "properties": [
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "fill": "dash",
+                      "dash": [
+                        10,
+                        10
+                      ]
+                    }
+                  },
+                  {
+                    "id": "custom.lineWidth",
+                    "value": 1
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 11,
+          "type": "timeseries",
+          "title": "CPU per pod (% of CPU request)",
+          "description": "Each ticket-service pod's CPU usage (kubelet, rate over the panel's rate interval) divided by its own CPU request from kube-state-metrics - the same ratio the HPA uses, one line per pod, never averaged here. Dashed: the HPA target. Values far above 100% are normal under load: usage can reach the 500m limit (1000% of the 50m request). The HPA's own number (next panel) uses metrics-server's shorter window, so the two can differ.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 30,
+            "w": 12,
+            "h": 9
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"cloudops-bridge\",container=\"ticket-service\"}[$__rate_interval])) / on (pod) sum by (pod) (kube_pod_container_resource_requests{namespace=\"cloudops-bridge\",container=\"ticket-service\",resource=\"cpu\"})",
+              "legendFormat": "{{pod}}",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "kube_horizontalpodautoscaler_spec_target_metric{namespace=\"cloudops-bridge\",horizontalpodautoscaler=\"ticket-service\",metric_name=\"cpu\",metric_target_type=\"utilization\"} / 100",
+              "legendFormat": "HPA target",
+              "refId": "B"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 0,
+                "showPoints": "never",
+                "spanNulls": false
+              },
+              "unit": "percentunit"
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "HPA target"
+                },
+                "properties": [
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "fill": "dash",
+                      "dash": [
+                        10,
+                        10
+                      ]
+                    }
+                  },
+                  {
+                    "id": "custom.lineWidth",
+                    "value": 1
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 12,
+          "type": "timeseries",
+          "title": "HPA CPU utilization: current vs target",
+          "description": "What the HPA itself reports (kube-state-metrics): average CPU utilization of Ready ticket-service pods relative to their requests, as computed from metrics-server, against the configured target. desired = ceil(current replicas x current / target), within a 10% tolerance.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 39,
+            "w": 24,
+            "h": 9
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "kube_horizontalpodautoscaler_status_target_metric{namespace=\"cloudops-bridge\",horizontalpodautoscaler=\"ticket-service\",metric_name=\"cpu\",metric_target_type=\"utilization\"}",
+              "legendFormat": "current (HPA view)",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "kube_horizontalpodautoscaler_spec_target_metric{namespace=\"cloudops-bridge\",horizontalpodautoscaler=\"ticket-service\",metric_name=\"cpu\",metric_target_type=\"utilization\"}",
+              "legendFormat": "target",
+              "refId": "B"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 0,
+                "showPoints": "never",
+                "spanNulls": false
+              },
+              "unit": "percent"
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "target"
+                },
+                "properties": [
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "fill": "dash",
+                      "dash": [
+                        10,
+                        10
+                      ]
+                    }
+                  },
+                  {
+                    "id": "custom.lineWidth",
+                    "value": 1
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
         }
       ],
       "templating": {

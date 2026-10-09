@@ -7,7 +7,8 @@ metadata:
     app.kubernetes.io/name: ticket-service
     app.kubernetes.io/part-of: cloudops-bridge
 spec:
-  replicas: 2
+  # No `replicas`: the HorizontalPodAutoscaler (hpa.yaml) owns the replica
+  # count (min 2). A replicas field here would be reset by every kubectl apply.
   selector:
     matchLabels:
       app.kubernetes.io/name: ticket-service

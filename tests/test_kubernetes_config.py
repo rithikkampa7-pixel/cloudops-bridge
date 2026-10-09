@@ -16,13 +16,14 @@ ROOT = Path(__file__).resolve().parent.parent
 @pytest.mark.parametrize(
     "configmap, source_dir, pattern",
     [
-        ("config/service-catalog-configmap.yaml", "service-catalog", "*.yaml"),
-        ("config/runbooks-configmap.yaml", "runbooks", "*.md"),
-        ("monitoring/grafana/dashboard-configmap.yaml", "dashboards", "*.json"),
+        ("kubernetes/config/service-catalog-configmap.yaml", "service-catalog", "*.yaml"),
+        ("kubernetes/config/runbooks-configmap.yaml", "runbooks", "*.md"),
+        ("kubernetes/monitoring/grafana/dashboard-configmap.yaml", "dashboards", "*.json"),
+        ("loadtest/loadgen-configmap.yaml", "loadtest", "*.py"),
     ],
 )
 def test_configmap_matches_source(configmap, source_dir, pattern):
-    manifest = yaml.safe_load((ROOT / "kubernetes" / configmap).read_text())
+    manifest = yaml.safe_load((ROOT / configmap).read_text())
     expected = {p.name: p.read_text() for p in sorted((ROOT / source_dir).glob(pattern))}
     assert manifest["data"] == expected, (
         f"{configmap} is out of date: run ./kubernetes/generate-configmaps.sh"

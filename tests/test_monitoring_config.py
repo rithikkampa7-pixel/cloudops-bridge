@@ -15,7 +15,7 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 K8S = ROOT / "kubernetes"
 DASHBOARD = json.loads((ROOT / "dashboards" / "ticket-service-overview.json").read_text())
-EXPRS = [t["expr"] for p in DASHBOARD["panels"] for t in p["targets"]]
+EXPRS = [t["expr"] for p in DASHBOARD["panels"] for t in p.get("targets", [])]
 
 
 def load(path):
@@ -35,10 +35,12 @@ def test_dashboard_identity_and_datasource():
     assert DASHBOARD["title"] == "CloudOps Bridge - Ticket Service Overview"
     datasource = embedded_yaml("monitoring/grafana/datasource-configmap.yaml", "prometheus.yaml")
     uid = datasource["datasources"][0]["uid"]
-    for panel in DASHBOARD["panels"]:
+    for panel in (p for p in DASHBOARD["panels"] if p["type"] != "row"):
         assert panel["datasource"]["uid"] == uid, panel["title"]
         for target in panel["targets"]:
-            assert 'job="ticket-service"' in target["expr"], (panel["title"], target["expr"])
+            # App metrics are scoped by job; Kubernetes metrics by namespace.
+            assert ('job="ticket-service"' in target["expr"]
+                    or 'namespace="cloudops-bridge"' in target["expr"]), (panel["title"], target["expr"])
 
 
 def test_dashboard_counters_use_rate_or_increase():
@@ -84,17 +86,26 @@ def test_grafana_datasource_points_at_prometheus_service():
     assert datasource["datasources"][0]["url"] == expected
 
 
-def test_prometheus_rbac_is_namespaced_read_only():
+def test_prometheus_rbac_is_minimal_and_read_only():
     docs = {d["kind"]: d for d in load("monitoring/prometheus/rbac.yaml")}
-    assert "ClusterRole" not in docs and "ClusterRoleBinding" not in docs
+    # Pod discovery: namespaced and read-only.
     assert docs["Role"]["metadata"]["namespace"] == "cloudops-bridge"
     assert docs["Role"]["rules"] == [
         {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list", "watch"]}
     ]
-    subject = docs["RoleBinding"]["subjects"][0]
     deployment = load("monitoring/prometheus/deployment.yaml")[0]
-    assert subject["name"] == deployment["spec"]["template"]["spec"]["serviceAccountName"]
-    assert subject["namespace"] == deployment["metadata"]["namespace"]
+    sa = deployment["spec"]["template"]["spec"]["serviceAccountName"]
+    for binding in (docs["RoleBinding"], docs["ClusterRoleBinding"]):
+        subject = binding["subjects"][0]
+        assert (subject["name"], subject["namespace"]) == (sa, deployment["metadata"]["namespace"])
+    # The only cluster-scoped access (Phase 7, kubelet resource metrics):
+    # list/watch nodes and read node metrics. Never nodes/proxy, which would
+    # also reach the kubelet's exec/logs API.
+    assert docs["ClusterRole"]["rules"] == [
+        {"apiGroups": [""], "resources": ["nodes"], "verbs": ["list", "watch"]},
+        {"apiGroups": [""], "resources": ["nodes/metrics"], "verbs": ["get"]},
+    ]
+    assert docs["ClusterRoleBinding"]["roleRef"]["name"] == docs["ClusterRole"]["metadata"]["name"]
 
 
 def test_no_credentials_committed():
@@ -116,3 +127,17 @@ def test_grafana_read_only_root_keeps_bundled_plugins():
     env = {e["name"]: e.get("value") for e in container["env"]}
     if container["securityContext"].get("readOnlyRootFilesystem"):
         assert env.get("GF_PLUGINS_PREINSTALL_DISABLED") == "true"
+
+
+def test_dashboard_queries_only_metrics_prometheus_collects():
+    # Every metric a panel uses must come from a configured scrape job, so no
+    # panel can silently show "No data" because its source was never added.
+    config = embedded_yaml("monitoring/prometheus/configmap.yaml", "prometheus.yml")
+    jobs = {j["job_name"]: j for j in config["scrape_configs"]}
+    app = {"up", "http_requests_total", "tickets_available", "tickets_sold_total"}
+    keep = jobs["kubelet-resource"]["metric_relabel_configs"][0]["regex"].split(";")[0]
+    kubelet = set(keep.strip("()").split("|"))
+    assert "kube-state-metrics" in jobs
+    used = {m for e in EXPRS for m in re.findall(r"([a-zA-Z_:][a-zA-Z0-9_:]*)\{", e)}
+    for metric in used:
+        assert metric in app | kubelet or metric.startswith("kube_"), metric

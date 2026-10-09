@@ -30,7 +30,7 @@ Prometheus discovers and scrapes every ticket-service pod and evaluates alert ru
 
 | Implemented | Still future |
 |---|---|
-| Prometheus, Kubernetes service discovery and scraping, PromQL, Grafana, provisioned Prometheus data source, provisioned CloudOps dashboard (Phase 4). Alert rules `HighErrorRate` and `TicketServiceTargetDown`, Alertmanager with grouping and alert lifecycle, promtool/amtool validation (Phase 5). Alertmanager → CloudOps Bridge webhook with catalog enrichment of firing and resolved alerts (Phase 6) | Any notification channel (email, Slack, paging), incident persistence/history, webhook authentication, a `HighLatency` alert (no latency metric exists), HPA, Locust, PostgreSQL, Argo CD, GitHub Actions, Terraform, Ansible |
+| Prometheus, Kubernetes service discovery and scraping, PromQL, Grafana, provisioned Prometheus data source, provisioned CloudOps dashboard (Phase 4). Alert rules `HighErrorRate` and `TicketServiceTargetDown`, Alertmanager with grouping and alert lifecycle, promtool/amtool validation (Phase 5). Alertmanager → CloudOps Bridge webhook with catalog enrichment of firing and resolved alerts (Phase 6). kubelet CPU metrics, kube-state-metrics, and the Grafana Scaling row for the HPA (Phase 7) | Any notification channel (email, Slack, paging), incident persistence/history, webhook authentication, a `HighLatency` alert (no latency metric exists), PostgreSQL, Argo CD, GitHub Actions, Terraform, Ansible |
 
 ## Files
 
@@ -38,11 +38,12 @@ Prometheus discovers and scrapes every ticket-service pod and evaluates alert ru
 kubernetes/monitoring/
 ├── namespace.yaml                         namespace monitoring
 ├── prometheus/rbac.yaml                   ServiceAccount + namespaced Role (read pods in cloudops-bridge only)
-├── prometheus/configmap.yaml              prometheus.yml: scrape jobs, discovery, rule files, Alertmanager target
+├── prometheus/configmap.yaml              prometheus.yml: scrape jobs (incl. kubelet + kube-state-metrics), rule files, Alertmanager target
 ├── prometheus/rules-configmap.yaml        alert rules (Phase 5), the single source of truth
 ├── alertmanager/configmap.yaml            alertmanager.yml: grouping; ticket-api → Bridge webhook (Phases 5–6)
 ├── alertmanager/deployment.yaml, service.yaml
 ├── validate-alerting.sh                   promtool + amtool checks and rule unit tests (Phase 5)
+├── kube-state-metrics/                    pinned v2.20.0, namespace-scoped, read-only Role (Phase 7)
 ├── prometheus/deployment.yaml, service.yaml
 ├── grafana/datasource-configmap.yaml      provisions the Prometheus data source
 ├── grafana/dashboard-provider-configmap.yaml
@@ -735,7 +736,44 @@ In all three runs:
 - **HighErrorRate has never fired live** (no safe 5xx source); it's checked only with isolated payload tests.
 - **The rollout false positive from Phase 5 would now reach the Bridge** as a `TicketServiceTargetDown` incident. The runbook explains how to recognize it.
 
-## 12. Troubleshooting
+## 12. Scaling metrics and dashboard (Phase 7)
+
+The HPA itself reads CPU from **metrics-server** (the `metrics.k8s.io` API; see [../README.md, section 11](../README.md#11-autoscaling-hpa-phase-7)). Prometheus and Grafana need their own copy of the same story, from two new scrape jobs:
+
+| Job | Source | What it provides | Verified series |
+|---|---|---|---|
+| `kubelet-resource` | Each node's kubelet, `https://<node>:10250/metrics/resource` (node discovery) | Per-pod CPU and memory, the same data metrics-server reads | `container_cpu_usage_seconds_total`, `container_memory_working_set_bytes`, with labels `namespace`, `pod`, `container`, `node` |
+| `kube-state-metrics` | kube-state-metrics v2.20.0 (`registry.k8s.io`, pinned) in `monitoring`, watching only `cloudops-bridge` | Object state | `kube_horizontalpodautoscaler_status_desired_replicas`, `..._status_current_replicas`, `..._spec_min_replicas`, `..._spec_max_replicas`, `..._spec_target_metric` / `..._status_target_metric` (labels `horizontalpodautoscaler`, `metric_name="cpu"`, `metric_target_type`), `kube_deployment_status_replicas_available{deployment}`, `kube_pod_container_resource_requests{pod,container,resource="cpu",unit="core"}` |
+
+Check that both are `UP` and storing data:
+
+```bash
+python3 kubernetes/tools/promql.py --targets
+python3 kubernetes/tools/promql.py 'count by (__name__, container) ({job="kubelet-resource"})'
+python3 kubernetes/tools/promql.py 'kube_horizontalpodautoscaler_status_desired_replicas'
+kubectl top pods -n cloudops-bridge
+```
+
+### Access and its limits (security)
+
+- **kube-state-metrics** runs in its documented limited-privileges mode: `--namespaces=cloudops-bridge`, `--resources=deployments,horizontalpodautoscalers,pods`, and a **namespaced, read-only Role** (list/watch). It has no cluster-wide access.
+- **The kubelet job needs the project's only ClusterRole**, because nodes aren't namespaced: `nodes` list/watch (discovery) and `nodes/metrics` get. It deliberately does **not** grant `nodes/proxy`, which would also open the kubelet's exec and logs API. A test enforces this.
+- **Important: the namespace filter is not an access boundary.** `metric_relabel_configs` keeps only two metrics for namespace `cloudops-bridge`, but that only controls what Prometheus *stores*. The `nodes/metrics` permission lets Prometheus's service account *read* the kubelet resource metrics of **every pod on the node**, in every namespace.
+- **Kubelet TLS isn't verified (`insecure_skip_verify: true`).** kind's kubelet serving certificates aren't signed by the cluster CA. Prometheus, like metrics-server with `--kubelet-insecure-tls`, therefore can't verify the kubelet's identity. That's acceptable on a single-node local cluster; production would verify against the cluster CA.
+
+### Grafana: the "Scaling (Phase 7: HPA)" row
+
+Three panels were added below the existing nine, which are unchanged. Every value comes from Prometheus; nothing is hardcoded:
+
+| Panel | Query (shortened) | Shows |
+|---|---|---|
+| Replicas: HPA desired vs current vs available | `kube_horizontalpodautoscaler_status_desired_replicas`, `..._current_replicas`, `kube_deployment_status_replicas_available`, plus `spec_min`/`spec_max` (dashed) | What the autoscaler wants versus what is Ready and serving. The gap is pods still starting |
+| CPU per pod (% of CPU request) | `sum by (pod) (rate(container_cpu_usage_seconds_total{container="ticket-service"}[$__rate_interval])) / on (pod) sum by (pod) (kube_pod_container_resource_requests{resource="cpu"})`, plus the HPA target / 100 (dashed) | The ratio the HPA uses, one line per pod. It can far exceed 100%: usage is capped by the 500m limit, which is 1000% of the 50m request |
+| HPA CPU utilization: current vs target | `kube_horizontalpodautoscaler_status_target_metric{metric_target_type="utilization"}` vs `..._spec_target_metric` | The HPA's own number |
+
+**The two CPU views differ slightly by design.** The per-pod panel is Prometheus's `rate()` over the panel's interval (at least 1 minute). The HPA uses metrics-server's ~15 s window, averaged over Ready pods only. At idle they read, for example, 13–15% per pod versus 17% for the HPA. Under steady load they converge.
+
+## 13. Troubleshooting
 
 | Symptom | Check |
 |---|---|
@@ -751,9 +789,12 @@ In all three runs:
 | Bridge logs `event=webhook_rejected` | Alertmanager sent something the Bridge couldn't parse (for example a new payload `version`). It isn't retried |
 | The same resolved alert logged twice | Expected: Prometheus re-sends resolved alerts for 15 min, and Alertmanager can include them in a later notification for the same group. Match by `fingerprint` |
 | Target-down demo went pending → inactive without firing | The pod restarted before the `for` was satisfied (see Demo A). Run it again |
+| HPA shows `cpu: <unknown>/70%` | metrics-server is still collecting its first samples (about 30–60 s after start), or isn't running: `kubectl -n kube-system get deploy metrics-server` and `kubectl top pods -n cloudops-bridge`. `kubectl -n cloudops-bridge describe hpa ticket-service` shows `FailedGetResourceMetric` while it warms up |
+| Scaling panels show "No data" | `python3 kubernetes/tools/promql.py --targets` must list `kubelet-resource` and `kube-state-metrics` as `UP`. If the kubelet target errors with `forbidden`, the ClusterRole binding is missing; Prometheus must have been restarted after the config change |
+| `kubectl auth can-i get nodes/metrics` says `no` | That syntax asks about a node *named* `metrics`. Check the subresource instead: `kubectl auth can-i get nodes --subresource=metrics --as=system:serviceaccount:monitoring:prometheus` |
 | port-forward: `address already in use` | Another project uses that port. Pick a different local port, for example `29090:9090` |
 
-## 13. Cleanup
+## 14. Cleanup
 
 Remove only monitoring (the Secret goes with the namespace):
 

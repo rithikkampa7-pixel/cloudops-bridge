@@ -1,5 +1,9 @@
-# Prometheus runs in "monitoring" but only needs to discover pods in
-# "cloudops-bridge". A namespaced Role (not a ClusterRole) limits it to that.
+# Prometheus runs in "monitoring". Pod discovery for ticket-service needs only
+# a namespaced Role in "cloudops-bridge". Phase 7 adds the project's only
+# cluster-scoped permission: nodes are not namespaced, so reading kubelet
+# resource metrics requires a ClusterRole - restricted to listing nodes and
+# reading node metrics. Deliberately NOT nodes/proxy (which would also reach
+# the kubelet's exec/logs API).
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -34,6 +38,37 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: prometheus-discovery
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cloudops-prometheus-kubelet-metrics
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: cloudops-bridge
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["list", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes/metrics"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cloudops-prometheus-kubelet-metrics
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: cloudops-bridge
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cloudops-prometheus-kubelet-metrics
 subjects:
   - kind: ServiceAccount
     name: prometheus

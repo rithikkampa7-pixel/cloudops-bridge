@@ -1,0 +1,52 @@
+# Scales ticket-service on CPU utilization measured by metrics-server.
+# Utilization = average CPU usage of Ready pods / their CPU request (50m in
+# deployment.yaml), so the 70% target means ~35m per pod. Every 15s the
+# controller computes desired = ceil(current * currentUtilization / 70),
+# ignoring differences within 10%, bounded by min/max.
+# The Deployment has no `replicas` field: this HPA owns the replica count.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ticket-service
+  namespace: cloudops-bridge
+  labels:
+    app.kubernetes.io/name: ticket-service
+    app.kubernetes.io/part-of: cloudops-bridge
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: ticket-service
+  # The baseline that existed before autoscaling: survives one pod failing.
+  minReplicas: 2
+  # Local demo ceiling on a single kind node.
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  # Written out for readability; these are the Kubernetes default values.
+  behavior:
+    scaleUp:
+      # React immediately: at most double, or +4 pods, per 15s (whichever is more).
+      stabilizationWindowSeconds: 0
+      selectPolicy: Max
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+        - type: Pods
+          value: 4
+          periodSeconds: 15
+    scaleDown:
+      # Only scale down to the highest recommendation of the last 5 minutes,
+      # so a brief dip in traffic does not remove capacity (no flapping).
+      stabilizationWindowSeconds: 300
+      selectPolicy: Max
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
