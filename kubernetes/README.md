@@ -555,6 +555,7 @@ Everything is declared in this repository. To rebuild, run sections 2–4 again.
 |---|---|---|
 | Replicas | 2–6, owned by the HPA (min 2) | Min 2 survives one pod failing and makes rollouts and reconciliation visible; the HPA adds pods under CPU load (section 11). The bridge stays at a fixed 2 |
 | Strategy | `maxUnavailable: 0`, `maxSurge: 1` | Never below 2 Ready pods; one extra pod at a time keeps the small local cluster light |
+| `progressDeadlineSeconds` (ticket-service) | 120 s (default 600 s) | A stuck rollout is reported as failed (`ProgressDeadlineExceeded`) sooner, for faster feedback in the local demo. Old pods keep serving; nothing is rolled back automatically ([gitops/README.md](../gitops/README.md#faster-rollout-failure-reporting)) |
 | Readiness probe | `/ready`, delay 2 s, every 5 s, timeout 2 s, 2 failures | Pulls a bad pod out of traffic within ~10 s; tolerates one slow response |
 | Liveness probe | `/health`, delay 5 s, every 10 s, timeout 2 s, 3 failures | Restarts only after ~30 s of consecutive failure, so a brief stall doesn't cause a restart loop. Always slower than readiness |
 | Requests | 50m CPU, 64Mi memory | Each process uses about 34 MiB idle (measured). Requests decide scheduling, and the HPA computes utilization against the CPU request (section 11) |

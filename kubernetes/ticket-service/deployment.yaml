@@ -8,7 +8,12 @@ metadata:
     app.kubernetes.io/part-of: cloudops-bridge
 spec:
   # No `replicas`: the HorizontalPodAutoscaler (hpa.yaml) owns the replica
-  # count (min 2). A replicas field here would be reset by every kubectl apply.
+  # count (min 2). A replicas field here would be reset by every kubectl apply
+  # (and by every Argo CD sync, see gitops/README.md).
+  # Report a stuck rollout (for example an image that does not exist) as
+  # failed after 120s instead of the 600s default: faster feedback for the
+  # local demo. Only the reported status changes; old pods keep serving.
+  progressDeadlineSeconds: 120
   selector:
     matchLabels:
       app.kubernetes.io/name: ticket-service

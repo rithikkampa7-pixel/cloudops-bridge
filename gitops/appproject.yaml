@@ -1,0 +1,28 @@
+# The Argo CD project for CloudOps Bridge: the guardrails every Application in
+# it must stay within. Anything not listed here is refused by Argo CD:
+#   - one source repository (this one);
+#   - one destination: the cloudops-bridge namespace of the local cluster;
+#   - only the namespaced kinds ticket-service uses. No Secrets, and no
+#     cluster-scoped resources (empty clusterResourceWhitelist).
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: cloudops-bridge
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: cloudops-bridge
+spec:
+  description: CloudOps Bridge local GitOps demo (ticket-service only).
+  sourceRepos:
+    - https://github.com/rithikkampa7-pixel/cloudops-bridge.git
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: cloudops-bridge
+  clusterResourceWhitelist: []
+  namespaceResourceWhitelist:
+    - group: apps
+      kind: Deployment
+    - group: ""
+      kind: Service
+    - group: autoscaling
+      kind: HorizontalPodAutoscaler

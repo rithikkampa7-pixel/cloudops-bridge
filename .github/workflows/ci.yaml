@@ -1,0 +1,81 @@
+# Validation only: nothing is published or deployed, and no secrets are used.
+# Third-party actions and tools are pinned (actions by commit SHA, kubeconform
+# and the schemas it uses by version, checksum or commit).
+name: CI
+
+on:
+  push:
+    branches: [phase8-gitops]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  KUBECONFORM_VERSION: v0.8.0
+  KUBECONFORM_SHA256: 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
+  # The Kubernetes version of the kind cluster the manifests are deployed to.
+  KUBERNETES_VERSION: 1.37.0
+  K8S_SCHEMAS: https://raw.githubusercontent.com/yannh/kubernetes-json-schema/5f1fa4f7908afc9b6641c62d282a4a22437626e1/{{.NormalizedKubernetesVersion}}-standalone{{.StrictSuffix}}/{{.ResourceKind}}{{.KindSuffix}}.json
+  CRD_SCHEMAS: https://raw.githubusercontent.com/datreeio/CRDs-catalog/63669a570e231d4f1f8396d229a1de512bcf0a34/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json
+
+jobs:
+  tests:
+    name: Python tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.13"
+      - run: pip install -r requirements-dev.txt
+      - run: pytest -v
+
+  alerting:
+    name: Alerting config (promtool, amtool)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.13"
+      - run: pip install PyYAML==6.0.3
+      - run: ./kubernetes/monitoring/validate-alerting.sh
+
+  manifests:
+    name: Kubernetes manifests (kubeconform)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install kubeconform
+        run: |
+          curl --fail --silent --show-error --location --output kubeconform.tar.gz \
+            "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          echo "${KUBECONFORM_SHA256}  kubeconform.tar.gz" | sha256sum --check
+          tar -xzf kubeconform.tar.gz kubeconform
+      # No -ignore-missing-schemas: a resource without a schema fails the job.
+      - name: Validate
+        run: |
+          ./kubeconform -strict -summary -kubernetes-version "${KUBERNETES_VERSION}" \
+            -schema-location "${K8S_SCHEMAS}" -schema-location "${CRD_SCHEMAS}" \
+            kubernetes/ loadtest/ gitops/
+
+  images:
+    name: Docker images (build only)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - run: docker build -t cloudops-bridge-ticket-service:phase3 -f ticket_service/Dockerfile .
+      - run: docker build -t cloudops-bridge-bridge:phase3 -f bridge/Dockerfile .
