@@ -1,6 +1,6 @@
 # Argo CD Application: ticket-service's desired state is
-# kubernetes/ticket-service/ (Deployment, Service, HPA) on the phase8-gitops
-# branch of this repository.
+# kubernetes/ticket-service/ (Deployment, Service, HPA) on the main branch of
+# this repository.
 #
 # Sync is AUTOMATED with self-heal: Argo CD applies new commits on its own and
 # reverts manual changes to Git-managed fields. Automatic pruning stays OFF:
@@ -23,7 +23,7 @@ spec:
   project: cloudops-bridge
   source:
     repoURL: https://github.com/rithikkampa7-pixel/cloudops-bridge.git
-    targetRevision: phase8-gitops
+    targetRevision: main
     path: kubernetes/ticket-service
     directory:
       recurse: false

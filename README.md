@@ -307,7 +307,7 @@ pytest -v
 ./kubernetes/monitoring/validate-alerting.sh
 ```
 
-102 pytest tests, plus `promtool`/`amtool` validation and rule unit tests (the last command, which needs Docker). GitHub Actions ([.github/workflows/ci.yaml](.github/workflows/ci.yaml)) runs the tests, the alerting validation, `kubeconform` against the Kubernetes 1.37.0 schemas, and both image builds on pull requests and on pushes to the `phase8-gitops` development branch. It builds images but publishes and deploys nothing.
+102 pytest tests, plus `promtool`/`amtool` validation and rule unit tests (the last command, which needs Docker). GitHub Actions ([.github/workflows/ci.yaml](.github/workflows/ci.yaml)) runs the tests, the alerting validation, `kubeconform` against the Kubernetes 1.37.0 schemas, and both image builds on pushes to `main` and the `phase8-gitops` development branch, and on pull requests. It builds images but publishes and deploys nothing.
 
 | Area | What the tests protect |
 |---|---|

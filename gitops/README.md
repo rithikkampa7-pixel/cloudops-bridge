@@ -2,7 +2,7 @@
 
 > Installation, adoption, HPA scaling under Argo CD, a Git-driven deployment, a failed release recovered with `git revert`, self-heal, and an incident regression have all been run on a local kind cluster. See [Verified results](#verified-results).
 
-Argo CD makes Git the desired state for **ticket-service**. It compares `kubernetes/ticket-service/` on the branch named in the Application's `targetRevision` (`phase8-gitops`) with what is running in the cluster, reports any difference as **OutOfSync**, and applies Git's version automatically (see [Sync policy](#sync-policy)). Its health and sync status show whether the last deployment succeeded.
+Argo CD makes Git the desired state for **ticket-service**. It compares `kubernetes/ticket-service/` on the branch named in the Application's `targetRevision` (`main`) with what is running in the cluster, reports any difference as **OutOfSync**, and applies Git's version automatically (see [Sync policy](#sync-policy)). Its health and sync status show whether the last deployment succeeded.
 
 This is a **local demonstration** on the same single-node kind cluster as the rest of the project. There is no image registry: images are still built locally and loaded with `kind load`. Argo CD deploys manifests, not images.
 
@@ -69,7 +69,7 @@ The upstream documentation recommends changing the password after the first logi
 
 ## Register the application
 
-Argo CD reads the `targetRevision` branch (`phase8-gitops`) **from GitHub**, so the commits it should deploy must be pushed first.
+Argo CD reads the `targetRevision` branch (`main`) **from GitHub**, so the commits it should deploy must be pushed first.
 
 ```bash
 kubectl apply -f gitops/appproject.yaml -f gitops/ticket-service-application.yaml

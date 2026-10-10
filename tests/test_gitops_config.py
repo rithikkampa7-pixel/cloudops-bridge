@@ -31,7 +31,7 @@ def test_application_deploys_ticket_service_from_this_repo_and_branch():
     source = APP["spec"]["source"]
     assert APP["kind"] == "Application" and APP["metadata"]["namespace"] == "argocd"
     assert source["repoURL"] == REPO_URL
-    assert source["targetRevision"] == "phase8-gitops"
+    assert source["targetRevision"] == "main"
     assert source["path"] == "kubernetes/ticket-service"
     assert source.get("directory", {}).get("recurse", False) is False
     assert APP["spec"]["project"] == PROJECT["metadata"]["name"]
