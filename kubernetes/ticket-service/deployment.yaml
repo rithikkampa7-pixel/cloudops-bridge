@@ -39,7 +39,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: ticket-service
-          image: cloudops-bridge-ticket-service:phase8-bad
+          image: cloudops-bridge-ticket-service:phase8-v2
           # Image exists only inside kind (loaded with `kind load docker-image`);
           # never try a remote registry.
           imagePullPolicy: Never
