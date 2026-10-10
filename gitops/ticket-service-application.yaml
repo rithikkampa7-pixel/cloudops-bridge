@@ -2,10 +2,12 @@
 # kubernetes/ticket-service/ (Deployment, Service, HPA) on the phase8-gitops
 # branch of this repository.
 #
-# Sync is MANUAL: there is no `automated` block, so Argo CD reports
-# OutOfSync and waits for someone to sync. Automatic pruning is therefore off
-# too. There is no resources-finalizer, so deleting this Application leaves
-# the running service in place.
+# Sync is AUTOMATED with self-heal: Argo CD applies new commits on its own and
+# reverts manual changes to Git-managed fields. Automatic pruning stays OFF:
+# removing a file from Git never deletes a live resource. Argo CD does not
+# wait for CI, so this is not a CI-gated deployment (see gitops/README.md).
+# There is no resources-finalizer, so deleting this Application leaves the
+# running service in place.
 #
 # The HPA owns the replica count (see gitops/README.md). Git never declares
 # spec.replicas, and ignoreDifferences + RespectIgnoreDifferences make sure
@@ -35,6 +37,10 @@ spec:
       jsonPointers:
         - /spec/replicas
   syncPolicy:
+    automated:
+      enabled: true
+      selfHeal: true
+      prune: false
     syncOptions:
       # The namespace is created by the Quick start, not by Argo CD.
       - CreateNamespace=false

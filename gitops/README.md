@@ -1,8 +1,8 @@
 # GitOps with Argo CD (Phase 8, in progress)
 
-> **Status:** in progress. Installing Argo CD and adopting ticket-service have been run on a local kind cluster. The other demonstrations haven't been run yet, so no other live behavior is claimed here. Results will be added once they have been measured.
+> **Status:** in progress. Installing Argo CD, adopting ticket-service, HPA scaling under Argo CD, a Git-driven deployment, and a failed release recovered with `git revert` have been run on a local kind cluster with manual sync. Measured results will be added to this page. Automated sync with self-heal is configured but not yet demonstrated here.
 
-Argo CD makes Git the desired state for **ticket-service**. It compares `kubernetes/ticket-service/` on the `phase8-gitops` branch with what is running in the cluster, reports any difference as **OutOfSync**, and applies Git's version when someone syncs. Its health and sync status show whether the last deployment succeeded.
+Argo CD makes Git the desired state for **ticket-service**. It compares `kubernetes/ticket-service/` on the `phase8-gitops` branch with what is running in the cluster, reports any difference as **OutOfSync**, and applies Git's version automatically (see [Sync policy](#sync-policy)). Its health and sync status show whether the last deployment succeeded.
 
 This is a **local demonstration** on the same single-node kind cluster as the rest of the project. There is no image registry: images are still built locally and loaded with `kind load`. Argo CD deploys manifests, not images.
 
@@ -76,6 +76,8 @@ kubectl apply -f gitops/appproject.yaml -f gitops/ticket-service-application.yam
 kubectl -n argocd get applications
 ```
 
+The AppProject and Application live in `gitops/`, outside the path Argo CD manages, so Argo CD doesn't update them from Git. After changing either file in Git, apply that file again with the command above.
+
 ## The HPA and GitOps
 
 The HPA changes `spec.replicas` of the Deployment all the time. If Git also declared a replica count, every sync would reset the HPA's choice, and Argo CD would report OutOfSync whenever the HPA scaled. Three safeguards prevent this:
@@ -88,10 +90,32 @@ Argo CD manages the HPA's own spec (2–6 replicas, 70% CPU) from Git like any o
 
 ## Sync policy
 
-- **Manual sync for now.** The Application has no `automated` block, so a Git change makes it **OutOfSync** and nothing changes in the cluster until someone syncs. This keeps the difference between Git and the cluster visible for the deployment and failure demonstrations.
-- **Planned next:** automatic sync with **self-heal** after the manual tests pass. Self-heal reverts manual changes to Git-managed fields.
-- **No automatic pruning,** now or later. Removing a file from Git won't delete the live resource without someone choosing to. With manual sync, leave **Prune** unticked in the sync dialog.
+The Application uses **automated sync with self-heal** (`automated.enabled: true`, `selfHeal: true`) and **no automatic pruning** (`prune: false`).
+
+| | Manual sync (used for the deployment and failure demonstrations) | Automated sync with self-heal (current) |
+|---|---|---|
+| A Git change | Git change → CI → someone reviews the OutOfSync diff → manual sync | Git change → Argo CD detects the new commit → deploys it automatically |
+| A manual `kubectl` change to a Git-managed field | Reported as OutOfSync; stays until someone syncs | Reverted to the Git value automatically |
+
+- **Argo CD doesn't wait for CI.** It deploys a new commit when it sees it (by polling or a manual refresh), whether or not GitHub Actions has finished or passed. So this local demonstration has **no CI-enforced approval gate**. A real setup would need one, for example branch protection that only lets reviewed, CI-passing changes reach the branch Argo CD watches, or a separate promotion step between environments. The failed-release demonstration also showed that CI can pass a release whose image doesn't exist in the cluster.
+- **No automatic pruning.** Removing a file from Git won't delete the live resource unless someone chooses to.
 - **The namespace isn't Argo CD's:** `CreateNamespace=false`. The Application has no resources finalizer, so deleting the Application leaves ticket-service running.
+- **The HPA is unaffected:** self-heal leaves `spec.replicas` alone because of the safeguards in [The HPA and GitOps](#the-hpa-and-gitops).
+
+### Turning automated sync off
+
+To return to manual sync, set `automated.enabled: false` in `ticket-service-application.yaml`, commit and push, then apply the file. Running ticket-service isn't changed:
+
+```bash
+kubectl apply -f gitops/ticket-service-application.yaml
+kubectl -n argocd get application ticket-service -o jsonpath='{.spec.syncPolicy.automated}{"\n"}'
+```
+
+In an emergency, the same change can be made directly on the live Application. Update the file in Git afterwards, or the next apply of the file turns automated sync back on:
+
+```bash
+kubectl -n argocd patch application ticket-service --type merge -p '{"spec":{"syncPolicy":{"automated":{"enabled":false}}}}'
+```
 
 ## Faster rollout failure reporting
 

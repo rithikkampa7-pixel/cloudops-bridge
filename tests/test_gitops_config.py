@@ -43,11 +43,15 @@ def test_application_path_holds_only_ticket_service_resources():
     assert kinds == ["Deployment", "HorizontalPodAutoscaler", "Service"]
 
 
-def test_sync_is_manual_and_never_prunes():
-    policy = APP["spec"].get("syncPolicy", {})
-    # No `automated` block: Argo CD reports OutOfSync and waits for a manual sync.
-    assert "automated" not in policy
+def test_sync_is_automated_with_self_heal_and_never_prunes():
+    policy = APP["spec"]["syncPolicy"]
+    # Argo CD applies Git changes on its own and reverts live drift...
+    assert policy["automated"]["enabled"] is True
+    assert policy["automated"]["selfHeal"] is True
+    # ...but never deletes a live resource because its file left Git.
+    assert policy["automated"]["prune"] is False
     assert "Prune=true" not in policy.get("syncOptions", [])
+    assert not policy["automated"].get("allowEmpty", False)
 
 
 def test_application_does_not_create_namespace_or_cascade_delete():
