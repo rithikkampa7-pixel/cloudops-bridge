@@ -1,8 +1,8 @@
-# GitOps with Argo CD (Phase 8, in progress)
+# GitOps with Argo CD
 
-> **Status:** in progress. Installing Argo CD, adopting ticket-service, HPA scaling under Argo CD, a Git-driven deployment, and a failed release recovered with `git revert` have been run on a local kind cluster with manual sync. Measured results will be added to this page. Automated sync with self-heal is configured but not yet demonstrated here.
+> Installation, adoption, HPA scaling under Argo CD, a Git-driven deployment, a failed release recovered with `git revert`, self-heal, and an incident regression have all been run on a local kind cluster. See [Verified results](#verified-results).
 
-Argo CD makes Git the desired state for **ticket-service**. It compares `kubernetes/ticket-service/` on the `phase8-gitops` branch with what is running in the cluster, reports any difference as **OutOfSync**, and applies Git's version automatically (see [Sync policy](#sync-policy)). Its health and sync status show whether the last deployment succeeded.
+Argo CD makes Git the desired state for **ticket-service**. It compares `kubernetes/ticket-service/` on the branch named in the Application's `targetRevision` (`phase8-gitops`) with what is running in the cluster, reports any difference as **OutOfSync**, and applies Git's version automatically (see [Sync policy](#sync-policy)). Its health and sync status show whether the last deployment succeeded.
 
 This is a **local demonstration** on the same single-node kind cluster as the rest of the project. There is no image registry: images are still built locally and loaded with `kind load`. Argo CD deploys manifests, not images.
 
@@ -69,7 +69,7 @@ The upstream documentation recommends changing the password after the first logi
 
 ## Register the application
 
-Argo CD reads the `phase8-gitops` branch **from GitHub**, so the commits it should deploy must be pushed first.
+Argo CD reads the `targetRevision` branch (`phase8-gitops`) **from GitHub**, so the commits it should deploy must be pushed first.
 
 ```bash
 kubectl apply -f gitops/appproject.yaml -f gitops/ticket-service-application.yaml
@@ -116,6 +116,21 @@ In an emergency, the same change can be made directly on the live Application. U
 ```bash
 kubectl -n argocd patch application ticket-service --type merge -p '{"spec":{"syncPolicy":{"automated":{"enabled":false}}}}'
 ```
+
+## Verified results
+
+Each test is a separate run on the local single-node kind cluster (Kubernetes 1.37.0, Argo CD v3.5.4). Availability was measured by an in-cluster checker calling `GET /tickets` through the Service 5 times per second. The deployment and failed-release tests used manual sync; self-heal and the incident test ran with automated sync.
+
+| Test | Result |
+|---|---|
+| **Adoption** of the running ticket-service | First comparison: OutOfSync, with the only difference being Argo CD's `tracking-id` annotation on the Service, Deployment and HPA. After one manual sync (no prune, force or replace): Synced/Healthy, with the same pod names, UIDs, container IDs and 0 restarts |
+| **HPA under Argo CD**: the on-sale load profile (20 → 200 → 20 req/s) | 2 → 3 (+24 s) → 6 (+40 s), then 6 → 3 → 2 after the stabilization window. Synced in 976 of 976 samples (every ~2 s); health Progressing for about 15 s in total while new pods started; no sync operation; `spec.replicas` changed only by the HPA. Load generator: 73,185 requests, 0 failed responses, 15 not sent (generator saturated at the start of the spike, so its Job reported failure). Availability: 10,223 ok, 0 failed |
+| **Git-driven deployment** (`:phase3` → `:phase8-v2`, same image content, new tag) | CI green → OutOfSync with a one-line image diff → manual sync → rolling update finished in about 14 s, with Ready pods never below 2. Health then went **Degraded for 30 s** because the HPA had no CPU metrics for the new pods yet (`FailedGetResourceMetric`). Availability: **2,913 / 2,913** ok |
+| **Failed release** (image tag that was never built) | CI passed (it can't see the cluster's images). After the sync: new pod `ErrImageNeverPull`, `ProgressDeadlineExceeded` 121 s later, Argo CD **Synced and Degraded**; the old pods stayed the only ready endpoints. `git revert` → CI green → sync: Synced/Healthy about 2 s after the sync started (the old ReplicaSet was reused). Availability over the whole failure and recovery: **8,708 / 8,708** ok |
+| **Self-heal** | `kubectl patch` set `progressDeadlineSeconds` to 121 (Git: 120). Argo CD's automated sync (`initiatedBy: automated`) restored 120 about 1.2 s later, with no pod restart and no rollout. Availability: **2,911 / 2,911** ok |
+| **Incident regression** (one frozen ticket-service process) | `TicketServiceTargetDown` pending +17 s, firing +32 s, enriched firing webhook +40 s, resolved webhook +100 s with the same fingerprint, 0 failed deliveries. Argo CD stayed Synced (health Progressing for 36 s) and started no sync. Availability: 2,863 / 2,867 ok: **4 requests timed out** in the ~8 s before readiness removed the frozen pod from the Service |
+
+**Sync isn't health.** In the failed release, Argo CD was **Synced** (the cluster matched Git) and **Degraded** (the workload didn't work) at the same time. The rollout alert and the Grafana GitOps row exist because of this.
 
 ## Faster rollout failure reporting
 

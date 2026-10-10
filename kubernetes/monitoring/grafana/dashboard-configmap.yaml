@@ -882,7 +882,7 @@ data:
                 "type": "prometheus",
                 "uid": "prometheus"
               },
-              "expr": "argocd_app_info{job=\"argocd-metrics\",name=\"ticket-service\",dest_namespace=\"cloudops-bridge\"}",
+              "expr": "max by (sync_status) (argocd_app_info{job=\"argocd-metrics\",name=\"ticket-service\",dest_namespace=\"cloudops-bridge\"})",
               "legendFormat": "{{sync_status}}",
               "refId": "A",
               "instant": true,
@@ -981,7 +981,7 @@ data:
                 "type": "prometheus",
                 "uid": "prometheus"
               },
-              "expr": "argocd_app_info{job=\"argocd-metrics\",name=\"ticket-service\",dest_namespace=\"cloudops-bridge\"}",
+              "expr": "max by (health_status) (argocd_app_info{job=\"argocd-metrics\",name=\"ticket-service\",dest_namespace=\"cloudops-bridge\"})",
               "legendFormat": "{{health_status}}",
               "refId": "A",
               "instant": true,
@@ -1224,7 +1224,7 @@ data:
                 "type": "prometheus",
                 "uid": "prometheus"
               },
-              "expr": "argocd_app_info{job=\"argocd-metrics\",name=\"ticket-service\",dest_namespace=\"cloudops-bridge\"}",
+              "expr": "max by (sync_status) (argocd_app_info{job=\"argocd-metrics\",name=\"ticket-service\",dest_namespace=\"cloudops-bridge\"})",
               "legendFormat": "sync: {{sync_status}}",
               "refId": "A"
             },
@@ -1233,7 +1233,7 @@ data:
                 "type": "prometheus",
                 "uid": "prometheus"
               },
-              "expr": "argocd_app_info{job=\"argocd-metrics\",name=\"ticket-service\",dest_namespace=\"cloudops-bridge\"}",
+              "expr": "max by (health_status) (argocd_app_info{job=\"argocd-metrics\",name=\"ticket-service\",dest_namespace=\"cloudops-bridge\"})",
               "legendFormat": "health: {{health_status}}",
               "refId": "B"
             },

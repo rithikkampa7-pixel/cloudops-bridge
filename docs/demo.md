@@ -87,7 +87,23 @@ What to look at:
 
 The README shows [an example from a verified run](../README.md#example-enriched-incident-real-values-from-the-rebuilt-cluster-run).
 
-## 4. The webhook on its own, without a cluster (about 1 minute)
+## 4. GitOps: what Argo CD shows (about 2 minutes)
+
+After the [GitOps step](../README.md#gitops-with-argo-cd), Argo CD manages ticket-service from Git with automated sync and self-heal. Log in to its UI as described in [gitops/README.md](../gitops/README.md#credentials), or check from the command line:
+
+```bash
+kubectl -n argocd get application ticket-service -o jsonpath='sync={.status.sync.status} health={.status.health.status} revision={.status.sync.revision}{"\n"}'
+```
+
+What to point out:
+
+- **Synced and Healthy are different things.** Synced means the cluster matches Git; Healthy means the workload works. In the failed-release test they were Synced and Degraded at the same time.
+- **The HPA and Argo CD don't fight.** Git doesn't declare a replica count, so scaling never makes the Application OutOfSync.
+- **Grafana's GitOps / Deployment Health row** shows the same sync and health status, plus the Deployment's rollout condition and their history.
+
+The deployment, failed-release, self-heal and incident tests and their measured results are in [gitops/README.md, Verified results](../gitops/README.md#verified-results).
+
+## 5. The webhook on its own, without a cluster (about 1 minute)
 
 Under Docker Compose or local Python ([docs/local-development.md](local-development.md)), post a stored sample of Alertmanager's payload. This shows the Bridge's response format; it is **not** a real Alertmanager delivery:
 

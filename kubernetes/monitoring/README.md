@@ -392,7 +392,7 @@ kubectl -n monitoring exec deploy/prometheus -- grep -c argocd-metrics /etc/prom
 kubectl -n monitoring exec deploy/prometheus -- kill -HUP 1
 ```
 
-The `grep` is only an example check for one change; adapt it to what you changed. Grafana reloads provisioned dashboard files on its own (every 10 s by default) once the mounted ConfigMap has updated.
+The `grep` is only an example check for one change; adapt it to what you changed. For a dashboard change, restart Grafana as shown above: in testing, Grafana picked up one updated dashboard file on its own but not a later one, so don't rely on automatic reloading.
 
 ## 10. Alerting
 

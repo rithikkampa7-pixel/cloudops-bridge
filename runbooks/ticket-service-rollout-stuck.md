@@ -80,9 +80,11 @@ git show HEAD -- kubernetes/ticket-service/deployment.yaml
 
 ticket-service is GitOps-managed. **Don't patch or `kubectl apply` the live Deployment** as the normal fix: Argo CD's self-heal reverts manual changes to Git-managed fields, and Git would still contain the bad release. Revert the change that broke the rollout instead:
 
+Push to the branch the Application tracks (`targetRevision` in `gitops/ticket-service-application.yaml`):
+
 ```bash
 git revert BAD_COMMIT
-git push origin phase8-gitops
+git push
 ```
 
 Argo CD deploys the revert when it sees the new commit. To check it now instead of waiting for the next poll, refresh and watch:
