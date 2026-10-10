@@ -1,69 +1,276 @@
 # CloudOps Bridge
 
-**Operational context for on-call engineers, on a local Kubernetes platform that monitors, alerts on, autoscales and GitOps-deploys a fictional ticketing service.**
+**A local Kubernetes project that runs a sample ticket-selling service, watches it, scales it, deploys it from Git, and turns its alerts into useful incident information for on-call engineers.**
 
-A bare alert such as *"TicketServiceTargetDown on ticket-api in production"* tells an on-call engineer very little. CloudOps Bridge turns it into an **enriched incident**: who owns the service, who responds first, what it depends on, which runbook to open and what to check first. Around it, a local Kubernetes platform runs the ticketing workload with health probes, Prometheus monitoring, Alertmanager alerting and CPU-based autoscaling, validates every change in GitHub Actions, and deploys the service from Git with Argo CD.
+> Fictional demonstration project. All services, teams and data are made up. Everything runs on one laptop with [kind](https://kind.sigs.k8s.io/) (Kubernetes in Docker); no cloud account is needed. The results below come from local tests, not from a production system.
 
-> Fictional demonstration project. All services, teams and data are made up. Everything runs locally on a single-node [kind](https://kind.sigs.k8s.io/) cluster; no cloud account is needed.
+## What does this project do?
+
+- **Runs a sample ticket application on Kubernetes.** The Ticket Service is a small web API where customers can list and buy tickets.
+- **Watches the application.** Prometheus collects metrics from every copy (pod) of the application, and Grafana shows them on a dashboard.
+- **Adds pods when traffic grows.** When CPU usage rises, Kubernetes starts more pods (2 to 6) and removes them again when traffic drops.
+- **Raises alerts when something breaks.** Prometheus detects problems and Alertmanager sends the alert on.
+- **Adds context to alerts.** CloudOps Bridge adds who owns the service, who should respond first, what it depends on, which runbook to open and what to check first.
+- **Deploys from Git.** Argo CD keeps Kubernetes matching what is stored in Git, and puts things back if someone changes the cluster by hand. GitHub Actions checks every change.
+
+### The problem it solves
+
+A bare alert like *"TicketServiceTargetDown on ticket-api in production"* tells an on-call engineer very little. They lose the first minutes of an incident finding out who owns the service, what it depends on, where the runbook is and what to check first. CloudOps Bridge answers those questions from a **service catalog**: one YAML file per service that the development and operations teams agree on, kept in Git instead of in someone's head.
+
+The point of the project is the operational work around a service, not the service itself: seeing what it does, scaling it, getting useful alerts, and changing it safely.
+
+## How it fits together
+
+```mermaid
+flowchart TD
+    DEV["Developer changes code or configuration"] --> GH["GitHub repository"]
+    GH --> CI["GitHub Actions checks it<br/>(tests, config checks, image builds)"]
+    GH --> ARGO["Argo CD deploys what is in Git"]
+    ARGO --> TS["Kubernetes runs the Ticket Service"]
+    TS --> PROM["Prometheus watches it"]
+    PROM --> GRAF["Grafana shows dashboards"]
+    PROM --> AM["Alertmanager sends alerts"]
+    AM --> BR["CloudOps Bridge"]
+    BR --> CTX["Owner + runbook + checks"]
+```
+
+GitHub Actions and Argo CD both start from GitHub. Argo CD does not wait for the GitHub Actions checks to pass (see [Known limitations](#known-limitations)).
+
+Scaling works separately:
+
+```mermaid
+flowchart LR
+    MS["Metrics Server<br/>measures pod CPU"] --> HPA["HPA<br/>decides how many pods"]
+    HPA --> TS["Ticket Service<br/>2 → 6 → 2 pods"]
+```
+
+A more detailed diagram is in [Detailed architecture](#detailed-architecture).
+
+## See it working
+
+These are real screenshots from the local tests.
+
+### Autoscaling during a traffic spike
 
 ![Grafana: replicas scaling from 2 to 6 and back to 2, per-pod CPU against the 70% HPA target, and HPA utilization during a 200 req/s spike](docs/images/grafana-autoscaling.png)
 
-*Grafana during the measured on-sale spike: the HPA scaled ticket-service from 2 to 6 replicas (its configured maximum) and back to 2. Real data from the acceptance run, 22:44–23:10 UTC.*
+*Grafana during a simulated ticket sale: the number of pods went from 2 to 6 (the maximum) and back to 2. From an earlier measured run of the same test.*
 
-## CloudOps Bridge in 60 seconds
+### Traffic and errors
 
-The project is about the operational workflow around a service (seeing it, scaling it, getting useful alerts, and changing it safely), not about the application itself.
+![Grafana: request rate up to 200 req/s, status codes 200 and 201 only, 4xx and 5xx flat at zero, tickets sold per minute](docs/images/grafana-traffic-errors.png)
 
-- **A sample ticketing application runs on Kubernetes.** Customers can browse and buy tickets through a small web API.
-- **It grows with demand.** When many customers arrive at once, Kubernetes automatically starts more copies (pods) of the application, and removes them when traffic drops.
-- **Problems are detected automatically.** Monitoring checks every copy of the application and raises an alert when one stops responding.
-- **Alerts arrive with context.** CloudOps Bridge adds what the on-call engineer needs first: the responsible team, who responds first, what the service depends on, which runbook to open and what to check.
-- **Changes go through Git.** GitHub Actions validates every change; Argo CD deploys what is in Git and automatically reverts manual changes to the deployed configuration.
-- **Bad releases are visible and recoverable.** A release that can't start is reported (Argo CD health, a rollout alert, a Grafana panel) while the previous version keeps serving, and `git revert` brings the previous version back.
+*Same run: requests rose to 200 per second, every response was successful (200 or 201), and errors stayed at zero.*
 
-### What was verified
+### Argo CD
 
-These results come from a **local Kubernetes demonstration on a single laptop**, not from a production environment. They show how the system behaves, not production capacity.
+![Argo CD: ticket-service Synced and Healthy, auto sync enabled, with its Service, Deployment and HPA](docs/images/argocd-application.png)
 
-- **60,000 requests with zero failures** during a simulated ticket-sale spike (200 requests per second for five minutes), in the measured run.
-- **Automatic scaling from 2 to 6 pods and back to 2** in the same run, without manual intervention.
-- **A real service failure became an enriched incident.** A stopped application process triggered a real alert, which CloudOps Bridge enriched with incident information, followed by a resolved notification when Kubernetes recovered the pod.
-- **A Git-driven deployment with no failed checks.** A new image tag committed to Git was rolled out by Argo CD; an in-cluster checker recorded 2,913 of 2,913 successful requests during that rollout.
-- **A broken release didn't take the service down.** A deliberately bad image tag never started, the previous version kept serving (8,708 of 8,708 checks succeeded), and `git revert` restored the release.
-- **Manual changes were reverted automatically.** With self-heal on, a changed Deployment field was restored from Git in about 1.2 seconds.
-- **Not every number is perfect.** When a process was frozen, 4 of 2,867 checks timed out in the roughly 8 seconds before Kubernetes stopped sending it traffic (see [Known limitations](#known-limitations)).
+*Argo CD shows that the Ticket Service matches the version stored in Git (Synced) and is working (Healthy). It manages the Service, Deployment and HPA.*
 
-Each result comes from its own measured run; the numbers are not combined.
+### GitOps status in Grafana
 
-### See it working
+![Grafana: Argo CD sync and health status history and the Deployment's rollout condition](docs/images/grafana-gitops-history.png)
 
-- [Grafana: autoscaling](docs/images/grafana-autoscaling.png): replicas, CPU per pod and the HPA target during the spike
-- [Grafana: traffic and errors](docs/images/grafana-traffic-errors.png): request rate and status codes, with no errors
-- [Grafana: full dashboard](docs/images/grafana-full-dashboard.png)
-- [Argo CD: ticket-service Synced and Healthy](docs/images/argocd-application.png)
-- [Grafana: GitOps and rollout status history](docs/images/grafana-gitops-history.png)
-- [Real incident-enrichment example](#example-enriched-incident-real-values-from-the-rebuilt-cluster-run)
-- [GitOps results](#results-gitops-deployment-and-recovery) and [GitOps documentation](gitops/README.md)
-- [Architecture diagram](#architecture)
-- [Runbooks](runbooks/)
-- [Demo walkthrough](docs/demo.md)
+*Grafana also shows Argo CD's status over time. During an incident test, the service stayed Synced; its health was briefly "Progressing" while a broken pod was being restarted.*
 
-## The problem
+The [full Grafana dashboard](docs/images/grafana-full-dashboard.png) is also available as an image.
 
-On-call engineers lose the first minutes of an incident answering the same questions: which service, which environment, who owns it, what it depends on, where the runbook is, what to check first. CloudOps Bridge answers them from a **service catalog**, one YAML file per service that the Development and CloudOps teams agree on as their operational handoff. The knowledge lives in version control instead of in someone's head.
+## How it works
 
-## Key capabilities
+1. **Users send requests** to the Ticket Service (in the tests, a load generator plays the users).
+2. **Kubernetes runs the Ticket Service** in several pods behind one Service address, and restarts any pod that stops answering its health check.
+3. **Prometheus collects metrics** from each pod (requests, errors, tickets) and from Kubernetes (pods, CPU, Deployment and HPA state, Argo CD status).
+4. **Grafana displays those metrics** on one dashboard.
+5. **The HPA adds pods** when average CPU usage goes above 70% of what each pod requested, and removes them when it falls.
+6. **Prometheus checks alert rules**, for example "a ticket-service pod can't be reached" or "a rollout is stuck".
+7. **Alertmanager sends ticket-service alerts** to CloudOps Bridge.
+8. **CloudOps Bridge adds context** from a service catalog file: first responder, owners, dependency, runbook and troubleshooting checks. It does not diagnose or fix anything.
+9. **Argo CD keeps the Deployment matching Git.** A change pushed to Git is deployed; a manual change to the cluster is undone.
 
-- **Incident enrichment.** Alertmanager sends real firing and resolved alerts to the Bridge's webhook. The Bridge maps the alert's labels (`alertname`, `service`, `environment`) to owners, first responder, dependencies, endpoints, runbook and suggested checks from `service-catalog/` and `runbooks/`. Unknown alerts are reported as `unmapped`; no runbook is invented.
-- **Monitoring.** Prometheus discovers every ticket-service pod through the Kubernetes API and scrapes it directly. Grafana shows traffic, status codes, errors, per-pod inventory and scaling, provisioned from Git.
-- **Alerting.** `TicketServiceTargetDown`, `HighErrorRate` and `TicketServiceRolloutStuck` rules, validated with `promtool` and `amtool`, with rule unit tests.
-- **Autoscaling.** A HorizontalPodAutoscaler keeps ticket-service between 2 and 6 replicas at 70% of its CPU request, driven by real ticket traffic. No artificial CPU-burning endpoint exists.
-- **Kubernetes operations.** Liveness and readiness probes, requests and limits, zero-drop rolling updates, rollback, and hardened, non-root containers.
-- **GitOps with Argo CD.** Argo CD v3.5.4 deploys ticket-service from Git with automated sync and self-heal; automatic pruning is off. An AppProject limits it to this repository, one namespace and three resource kinds. The HPA keeps sole ownership of the replica count.
-- **CI with GitHub Actions.** Every push runs the tests, `promtool`/`amtool`, `kubeconform` schema validation and both image builds, with third-party actions pinned by commit SHA.
-- **Rollout monitoring.** `TicketServiceRolloutStuck` fires when a rollout exceeds its progress deadline, and Grafana shows Argo CD sync and health status next to the Deployment's rollout condition.
+## What each tool does
 
-## Architecture
+| Tool | Why it is here |
+|---|---|
+| Kubernetes (kind) | Runs the Ticket Service and the other components on a local cluster |
+| HPA (Horizontal Pod Autoscaler) | Adds or removes Ticket Service pods based on CPU usage (2 to 6 pods) |
+| Metrics Server | Measures pod CPU and gives it to the HPA |
+| kube-state-metrics | Tells Prometheus the state of Kubernetes objects (replicas, HPA, rollout condition) |
+| Prometheus | Collects metrics and checks alert rules |
+| Grafana | Shows the dashboards |
+| Alertmanager | Groups alerts and sends ticket-service alerts to CloudOps Bridge |
+| CloudOps Bridge | Adds owner, dependency, runbook and checks to each alert |
+| Argo CD | Keeps the Ticket Service in Kubernetes matching what is stored in Git |
+| GitHub Actions | Runs tests and configuration checks on every push and pull request |
+
+## What happens during high traffic?
+
+```
+Normal traffic  →  2 pods
+Traffic spike   →  CPU rises above the target  →  HPA adds pods  →  6 pods
+Traffic drops   →  HPA waits 5 minutes          →  back to 2 pods
+```
+
+In the final local end-to-end test (the project's standard load profile: 20 requests per second for 3 minutes, 200 per second for 5 minutes, then 20 per second for 8 minutes):
+
+| Result | Value |
+|---|---|
+| Requests sent | **73,200** |
+| Failed | **0** |
+| Skipped (load generator too busy) | **0** |
+| Pods | **2 → 6** 21 s after the spike started (all 6 ready about 7 s later), then **6 → 4 → 2** after the traffic dropped |
+| Separate availability check (in-cluster, every 0.2 s) | 7,312 successful, 0 failed |
+| Argo CD during scaling | Stayed **Synced**; it never fought the HPA over the pod count |
+
+This shows how Kubernetes reacts on one laptop. It is **not** a production benchmark.
+
+## What happens when something breaks?
+
+In the final end-to-end test, one Ticket Service process was frozen on purpose (the pod stayed, but stopped answering):
+
+```
+One Ticket Service process stops responding
+        ↓
+Prometheus can't reach it                        +10 s
+        ↓
+TicketServiceTargetDown alert is pending         +25 s
+        ↓
+Alert is firing; Alertmanager has it             +41 s
+        ↓
+Kubernetes restarts the frozen container         +44 s
+        ↓
+CloudOps Bridge receives the alert and adds      +50 s
+first responder, owners, dependency, runbook, 6 checks
+        ↓
+Prometheus sees the pod again; alert resolved    +69 s
+        ↓
+CloudOps Bridge receives the "resolved" message  +110 s  (same alert ID)
+```
+
+**Availability during the incident:** 1,421 of 1,424 requests succeeded. The **3 that failed** timed out in the few seconds before Kubernetes' readiness check took the frozen pod out of the Service. The other pod kept serving. This is a real, measured limitation, not zero downtime.
+
+An example of the information CloudOps Bridge adds is shown in [Example enriched incident](#example-enriched-incident-real-values-from-the-rebuilt-cluster-run).
+
+## What happens if someone changes Kubernetes by hand?
+
+Argo CD keeps Kubernetes matching Git. Git remains the source of truth.
+
+```
+Git says:          progressDeadlineSeconds = 120
+Someone changes Kubernetes directly to 121
+        ↓
+Argo CD notices the difference and syncs automatically
+        ↓
+Kubernetes is back to 120
+```
+
+In the final end-to-end test this took **about 1 second**. No pod was replaced or restarted.
+
+## What happens with a bad release?
+
+A deliberately broken release (an image that doesn't exist) was deployed through Git in an earlier test. The new pod could not start, Argo CD showed **Synced but Degraded** (the cluster matched Git, but the app didn't work), and the old pods **kept serving**: 8,708 of 8,708 availability checks succeeded. Reverting the commit in Git brought the service back to **Synced and Healthy**. Details: [gitops/README.md](gitops/README.md#verified-results).
+
+## Verified results
+
+| Check | Result | Where it was measured |
+|---|---|---|
+| Application smoke test | 8/8 passed | Final local end-to-end test |
+| Automated tests | 102/102 passed | GitHub Actions on `main` |
+| Kubernetes manifests | 44/44 valid | GitHub Actions on `main` |
+| Prometheus targets | 6/6 up | Final local end-to-end test |
+| Load test | 73,200 requests, 0 failed, 0 skipped | Final local end-to-end test |
+| Autoscaling | 2 → 6 → 2 pods | Final local end-to-end test |
+| Self-healing | Manual change undone in about 1 second | Final local end-to-end test |
+| Real incident | Detected, enriched, delivered and recovered | Final local end-to-end test |
+| Incident availability | 1,421 / 1,424 successful (3 timeouts) | Final local end-to-end test |
+| Bad release | Old version kept serving (8,708 / 8,708); recovered with `git revert` | Earlier GitOps failure test |
+
+Load and incident results are from a local single-node demonstration. More measured runs are in [More measured results](#results-autoscaling-under-a-ticket-on-sale-spike).
+
+## Quick start (kind)
+
+**You need:** Docker Desktop running, `kind` (`brew install kind`), and kubectl 1.36 or newer (`brew install kubernetes-cli`). Code blocks contain only commands, so they paste cleanly into zsh. Run them in order.
+
+Get the code:
+
+```bash
+git clone https://github.com/rithikkampa7-pixel/cloudops-bridge.git
+cd cloudops-bridge
+```
+
+Create the local Kubernetes cluster:
+
+```bash
+kind create cluster --name cloudops-bridge
+kubectl wait --for=condition=Ready node --all --timeout=120s
+```
+
+Build the two application images and copy them into the cluster (there is no image registry):
+
+```bash
+docker build -t cloudops-bridge-ticket-service:phase3 -t cloudops-bridge-ticket-service:phase8-v2 -f ticket_service/Dockerfile .
+docker build -t cloudops-bridge-bridge:phase3 -f bridge/Dockerfile .
+kind load docker-image cloudops-bridge-ticket-service:phase3 cloudops-bridge-ticket-service:phase8-v2 cloudops-bridge-bridge:phase3 --name cloudops-bridge
+```
+
+Deploy everything: the namespaces, a generated Grafana password (kept in the cluster, never in Git), then all the manifests (application, monitoring, alerting, autoscaling):
+
+```bash
+kubectl apply -f kubernetes/namespace.yaml -f kubernetes/monitoring/namespace.yaml
+kubectl -n monitoring get secret grafana-admin || kubectl -n monitoring create secret generic grafana-admin --from-literal=admin-password="$(openssl rand -base64 24)"
+kubectl apply -R -f kubernetes/
+```
+
+Wait until everything is ready:
+
+```bash
+kubectl -n cloudops-bridge rollout status deployment/ticket-service --timeout=120s
+kubectl -n cloudops-bridge rollout status deployment/bridge --timeout=120s
+kubectl -n monitoring rollout status deployment/prometheus --timeout=300s
+kubectl -n monitoring rollout status deployment/grafana --timeout=300s
+kubectl -n monitoring rollout status deployment/alertmanager --timeout=300s
+kubectl -n kube-system rollout status deployment/metrics-server --timeout=300s
+kubectl -n monitoring rollout status deployment/kube-state-metrics --timeout=300s
+kubectl -n cloudops-bridge wait --for=jsonpath='{.status.readyReplicas}'=2 deployment/ticket-service --timeout=300s
+```
+
+The first `get secret` prints `NotFound` on a new cluster; that's expected. The last `wait` matters because the HPA owns the pod count: a new Deployment starts with 1 pod and the HPA raises it to 2. The `:phase3` image tags are historical names. The ticket-service image is also tagged `:phase8-v2`, the tag its Deployment uses since the [GitOps deployment](gitops/README.md); both tags are the same build, and the load test still uses `:phase3`.
+
+Test every endpoint from inside the cluster, then open Grafana (port-forward in its own tab, log in as `admin` with the password copied to your clipboard):
+
+```bash
+kubectl -n cloudops-bridge exec -i deploy/bridge -- python - < kubernetes/tools/smoke_test.py
+kubectl -n monitoring get secret grafana-admin -o jsonpath='{.data.admin-password}' | base64 -d | pbcopy
+kubectl -n monitoring port-forward svc/grafana 13000:3000
+```
+
+Then open http://localhost:13000. Ports 19090 (Prometheus), 13000 (Grafana) and 19093 (Alertmanager) avoid clashing with tools commonly running on the default ports.
+
+Run the ticket-sale traffic test (about 16 minutes of traffic, then up to 5 minutes more for scale-down) and watch the HPA's decisions:
+
+```bash
+kubectl apply -f loadtest/loadgen-configmap.yaml
+kubectl -n cloudops-bridge delete job ticket-sale --ignore-not-found
+kubectl create -f loadtest/ticket-sale-job.yaml
+python3 kubernetes/tools/scale_watch.py 1200 5
+```
+
+### GitOps with Argo CD
+
+After the steps above, install Argo CD (pinned version, checksum-verified) and register the Ticket Service. The Application deploys the branch named in `targetRevision` in [gitops/ticket-service-application.yaml](gitops/ticket-service-application.yaml) (`main`) from GitHub, with automated sync and self-heal:
+
+```bash
+./gitops/install-argocd.sh
+kubectl apply -f gitops/appproject.yaml -f gitops/ticket-service-application.yaml
+kubectl -n argocd wait --for=jsonpath='{.status.sync.status}'=Synced application/ticket-service --timeout=300s
+kubectl -n argocd wait --for=jsonpath='{.status.health.status}'=Healthy application/ticket-service --timeout=300s
+```
+
+Prometheus's `argocd-metrics` target is `DOWN` until Argo CD is installed, then `UP`. Once the Application has synced, the Ticket Service is managed by Argo CD: **don't rerun `kubectl apply -R -f kubernetes/`** on that cluster ([why](gitops/README.md#ownership-before-and-after-adoption)). Logging in to the Argo CD UI is described in [gitops/README.md](gitops/README.md#credentials).
+
+Clean up with `kind delete cluster --name cloudops-bridge`. Monitoring history lives only inside the cluster and is deleted with it.
+
+## Detailed architecture
 
 ```mermaid
 flowchart LR
@@ -102,7 +309,20 @@ flowchart LR
 
 **Responsibilities:** Argo CD *deploys* what is in Git, Prometheus *detects*, Alertmanager *delivers*, the Bridge *explains*. GitHub Actions validates changes, but Argo CD doesn't wait for it (see [Known limitations](#known-limitations)). The Bridge doesn't diagnose root causes or remediate anything.
 
+## Key capabilities
+
+- **Incident enrichment.** Alertmanager sends real firing and resolved alerts to the Bridge's webhook. The Bridge maps the alert's labels (`alertname`, `service`, `environment`) to owners, first responder, dependencies, endpoints, runbook and suggested checks from `service-catalog/` and `runbooks/`. Unknown alerts are reported as `unmapped`; no runbook is invented.
+- **Monitoring.** Prometheus discovers every ticket-service pod through the Kubernetes API and scrapes it directly. Grafana shows traffic, status codes, errors, per-pod inventory and scaling, provisioned from Git.
+- **Alerting.** `TicketServiceTargetDown`, `HighErrorRate` and `TicketServiceRolloutStuck` rules, validated with `promtool` and `amtool`, with rule unit tests.
+- **Autoscaling.** A HorizontalPodAutoscaler keeps ticket-service between 2 and 6 replicas at 70% of its CPU request, driven by real ticket traffic. No artificial CPU-burning endpoint exists.
+- **Kubernetes operations.** Liveness and readiness probes, requests and limits, zero-drop rolling updates, rollback, and hardened, non-root containers.
+- **GitOps with Argo CD.** Argo CD v3.5.4 deploys ticket-service from Git with automated sync and self-heal; automatic pruning is off. An AppProject limits it to this repository, one namespace and three resource kinds. The HPA keeps sole ownership of the replica count.
+- **CI with GitHub Actions.** Every push runs the tests, `promtool`/`amtool`, `kubeconform` schema validation and both image builds, with third-party actions pinned by commit SHA.
+- **Rollout monitoring.** `TicketServiceRolloutStuck` fires when a rollout exceeds its progress deadline, and Grafana shows Argo CD sync and health status next to the Deployment's rollout condition.
+
 ## Results: autoscaling under a ticket on-sale spike
+
+*More measured results, starting with the acceptance run of the traffic test (an earlier run than the final end-to-end test above).*
 
 In a local single-node kind experiment, a 200 req/s ticket-traffic spike drove HPA scaling from 2 to 6 pods; all 60,000 spike requests completed successfully in that run. The traffic was real `GET /tickets` browsing plus 5% single-ticket purchases from an in-cluster load generator. The cluster was freshly built using only the documented commands.
 
@@ -123,9 +343,7 @@ In a local single-node kind experiment, a 200 req/s ticket-traffic spike drove H
 - **Six replicas was the configured maximum, and CPU remained above the 70% target during the spike.** More capacity would have been needed to reach the target.
 - This is one run on one laptop node. It shows how Kubernetes reacts to a spike; it is **not** a benchmark or a production capacity result.
 
-![Grafana: request rate up to 200 req/s, status codes 200 and 201 only, 4xx and 5xx flat at zero, tickets sold per minute](docs/images/grafana-traffic-errors.png)
-
-*Same window: request rate, responses by status code (only 200 and 201), and 4xx/5xx errors at zero throughout.*
+Grafana for this run: [autoscaling](docs/images/grafana-autoscaling.png), [traffic and errors](docs/images/grafana-traffic-errors.png) (both shown in [See it working](#see-it-working)).
 
 Full method, timeline, per-stage numbers and findings: [kubernetes/README.md, section 11](kubernetes/README.md#11-autoscaling-hpa).
 
@@ -191,13 +409,7 @@ Argo CD manages ticket-service from Git; the HPA owns the replica count. Each ro
 | Self-heal | A manual change to `progressDeadlineSeconds` was reverted by an automated sync in about 1.2 s, with no pod restart | **2,911 / 2,911** ok |
 | Incident under Argo CD | Frozen process → `TicketServiceTargetDown` firing (+32 s) → enriched webhook (+40 s) → resolved (+100 s), same fingerprint; no Argo CD sync | 2,863 / 2,867 ok (4 timeouts) |
 
-![Argo CD: ticket-service Synced and Healthy, auto sync enabled, with its Service, Deployment and HPA](docs/images/argocd-application.png)
-
-*Argo CD after the GitOps tests: Synced and Healthy, automated sync on, managing the ticket-service Service, Deployment and HPA.*
-
-![Grafana: Argo CD sync and health status history and the Deployment's rollout condition](docs/images/grafana-gitops-history.png)
-
-*Grafana's GitOps row during the incident test: Synced throughout; health briefly Progressing while the frozen pod was NotReady.*
+Screenshots: [Argo CD](docs/images/argocd-application.png) and [Grafana GitOps status](docs/images/grafana-gitops-history.png) (shown in [See it working](#see-it-working)).
 
 Details, timings and caveats for each run: [gitops/README.md, Verified results](gitops/README.md#verified-results).
 
@@ -216,67 +428,6 @@ Problems found by testing on a live cluster, and what changed because of them:
 8. **A hung process receives traffic until readiness removes it.** With probes every 5 s and 2 failures required, a frozen pod stayed a Service endpoint for about 8 s, and 4 requests timed out.
 
 Short-lived target-down states also showed why alert timing matters: one alert fired for a terminating pod during a rollout, and during scale-up a brand-new pod was scraped before it listened (pending for about 15 s, never fired). The 15 s `for` values here are demo values; production uses minutes.
-
-## Quick start (kind)
-
-**Prerequisites:** Docker Desktop running, `kind` (`brew install kind`), and kubectl 1.36 or newer (`brew install kubernetes-cli`). Code blocks contain only commands, so they paste cleanly into zsh.
-
-```bash
-git clone https://github.com/rithikkampa7-pixel/cloudops-bridge.git
-cd cloudops-bridge
-kind create cluster --name cloudops-bridge
-kubectl wait --for=condition=Ready node --all --timeout=120s
-docker build -t cloudops-bridge-ticket-service:phase3 -t cloudops-bridge-ticket-service:phase8-v2 -f ticket_service/Dockerfile .
-docker build -t cloudops-bridge-bridge:phase3 -f bridge/Dockerfile .
-kind load docker-image cloudops-bridge-ticket-service:phase3 cloudops-bridge-ticket-service:phase8-v2 cloudops-bridge-bridge:phase3 --name cloudops-bridge
-kubectl apply -f kubernetes/namespace.yaml -f kubernetes/monitoring/namespace.yaml
-kubectl -n monitoring get secret grafana-admin || kubectl -n monitoring create secret generic grafana-admin --from-literal=admin-password="$(openssl rand -base64 24)"
-kubectl apply -R -f kubernetes/
-kubectl -n cloudops-bridge rollout status deployment/ticket-service --timeout=120s
-kubectl -n cloudops-bridge rollout status deployment/bridge --timeout=120s
-kubectl -n monitoring rollout status deployment/prometheus --timeout=300s
-kubectl -n monitoring rollout status deployment/grafana --timeout=300s
-kubectl -n monitoring rollout status deployment/alertmanager --timeout=300s
-kubectl -n kube-system rollout status deployment/metrics-server --timeout=300s
-kubectl -n monitoring rollout status deployment/kube-state-metrics --timeout=300s
-kubectl -n cloudops-bridge wait --for=jsonpath='{.status.readyReplicas}'=2 deployment/ticket-service --timeout=300s
-```
-
-The Grafana admin password is generated into a Kubernetes Secret at deploy time and never stored in Git (the `get secret` prints `NotFound` first on a fresh cluster). The last `wait` matters because the HPA owns the replica count: a fresh Deployment starts at 1 replica and the HPA raises it to 2. The `:phase3` image tags are historical names. The ticket-service image is also tagged `:phase8-v2`, the tag its Deployment uses since the [GitOps deployment](gitops/README.md); both tags are the same build, and the load test still uses `:phase3`.
-
-Test every endpoint from inside the cluster, then open Grafana (port-forward in its own tab, log in as `admin` with the password copied to your clipboard):
-
-```bash
-kubectl -n cloudops-bridge exec -i deploy/bridge -- python - < kubernetes/tools/smoke_test.py
-kubectl -n monitoring get secret grafana-admin -o jsonpath='{.data.admin-password}' | base64 -d | pbcopy
-kubectl -n monitoring port-forward svc/grafana 13000:3000
-```
-
-Then open http://localhost:13000. Ports 19090 (Prometheus), 13000 (Grafana) and 19093 (Alertmanager) avoid clashing with tools commonly running on the default ports.
-
-Run the on-sale scenario (about 16 minutes of traffic, then up to 5 minutes more for scale-down) and watch the HPA's decisions:
-
-```bash
-kubectl apply -f loadtest/loadgen-configmap.yaml
-kubectl -n cloudops-bridge delete job ticket-sale --ignore-not-found
-kubectl create -f loadtest/ticket-sale-job.yaml
-python3 kubernetes/tools/scale_watch.py 1200 5
-```
-
-### GitOps with Argo CD
-
-After the Quick start, install Argo CD (pinned version, checksum-verified) and register ticket-service. The Application deploys the branch named in `targetRevision` in [gitops/ticket-service-application.yaml](gitops/ticket-service-application.yaml) from GitHub, with automated sync and self-heal:
-
-```bash
-./gitops/install-argocd.sh
-kubectl apply -f gitops/appproject.yaml -f gitops/ticket-service-application.yaml
-kubectl -n argocd wait --for=jsonpath='{.status.sync.status}'=Synced application/ticket-service --timeout=300s
-kubectl -n argocd wait --for=jsonpath='{.status.health.status}'=Healthy application/ticket-service --timeout=300s
-```
-
-Prometheus's `argocd-metrics` target is `DOWN` until Argo CD is installed, then `UP`. Once the Application has synced, ticket-service is GitOps-managed: **don't rerun `kubectl apply -R -f kubernetes/`** on that cluster ([why](gitops/README.md#ownership-before-and-after-adoption)). Logging in to the Argo CD UI is described in [gitops/README.md](gitops/README.md#credentials).
-
-Clean up with `kind delete cluster --name cloudops-bridge`. Monitoring history lives only inside the cluster and is deleted with it.
 
 ## Demo
 
@@ -332,24 +483,24 @@ pytest -v
 
 ## Known limitations
 
-- **Local, single node.** All results come from one kind node on a laptop. They show Kubernetes behavior, not production capacity or performance. This is a demonstration, not a production setup.
-- **No image registry.** Images are built locally and loaded into kind; a GitOps change to an image tag only works if that tag has been preloaded.
-- **Argo CD doesn't wait for CI.** With automated sync, a pushed commit can be deployed before GitHub Actions finishes, or even if it fails. There is no CI-enforced approval gate; a real setup would need branch protection or a promotion step.
-- **Automatic pruning is disabled on purpose.** Removing a file from Git doesn't delete the live resource.
-- **Only ticket-service is GitOps-managed.** The Bridge, monitoring and metrics-server are still applied with `kubectl`.
-- **A frozen process gets traffic for a few seconds.** Until two readiness checks fail (about 8 s with these settings), a hung pod stays a Service endpoint; the measured run had 4 timed-out requests out of 2,867.
-- **`TicketServiceRolloutStuck` hasn't fired live.** It is unit-tested with promtool and loaded and healthy on the live cluster.
-- **The HPA hit its ceiling.** During the spike, 6 replicas (the configured maximum) still ran above the 70% CPU target.
-- **Per-replica in-memory inventory.** Each ticket-service pod has its own 5,000 tickets. New pods start fresh and removed pods lose their sales, so pods disagree and totals can't be summed. Shared state (PostgreSQL) isn't implemented.
-- **`HighErrorRate` hasn't fired live.** It is unit-tested and stayed correctly silent under 4xx traffic, but the app has no safe way to produce 5xx without adding a failure-injection endpoint, which this project deliberately doesn't do. A `HighLatency` alert isn't possible yet: the app exports no latency metric.
-- **No persistence or notification channels.** Incidents exist only in the Bridge's logs and HTTP responses. There's no email, chat or paging, and only `ticket-api` alerts are routed to the Bridge.
-- **Demo alert timings.** The 15 s `for` values are chosen to be observable before Kubernetes self-heals a pod; one false positive was observed during a rolling update.
-- **Monitoring history is ephemeral**: Prometheus and Grafana data live in `emptyDir` volumes and are lost when the cluster is deleted. Configuration comes from Git.
-- **The `argocd-metrics` target is `DOWN` without Argo CD**, until the GitOps step is done.
-- **No webhook authentication.** The Bridge webhook is reachable only inside the cluster (ClusterIP) but has no authentication.
-- **Context, not diagnosis.** The Bridge doesn't determine root causes or remediate.
-- **Broad Argo CD controller permissions.** The upstream install gives Argo CD's application controller cluster-wide permissions. The AppProject limits what this project's Application can deploy, not what Argo CD itself can do.
-- **Kubernetes 1.37 is newer than Argo CD 3.5's tested range** (1.33–1.36). It worked for everything demonstrated here.
+- **Local, single node.** Everything runs on one kind node on a laptop. The results show how Kubernetes behaves, not production capacity. This is a demonstration, not a production setup.
+- **No image registry.** Images are built locally and loaded into kind. A Git change to an image tag only works if that image has been loaded first.
+- **Argo CD doesn't wait for CI.** With automated sync, a pushed commit can be deployed before GitHub Actions finishes, or even if it fails. A real setup would need branch protection or a promotion step.
+- **Automatic pruning is off on purpose.** Deleting a file from Git does not delete the resource from the cluster.
+- **Only the Ticket Service is managed by Argo CD.** The Bridge, monitoring and metrics-server are still applied with `kubectl`.
+- **A frozen pod gets traffic for a few seconds.** Until two readiness checks fail (about 8 seconds with these settings), a hung pod stays in the Service. The measured incident had 3 to 4 timed-out requests.
+- **`TicketServiceRolloutStuck` hasn't fired live.** It is covered by promtool unit tests and is loaded and healthy; the stuck rollout it detects was produced for real in the bad-release test.
+- **Six pods is the ceiling.** During the traffic spike, 6 pods (the configured maximum) still ran above the 70% CPU target.
+- **Ticket inventory is in memory, per pod.** Each pod has its own 5,000 tickets; new pods start fresh and removed pods lose their sales. A shared database (PostgreSQL) isn't implemented.
+- **`HighErrorRate` hasn't fired live.** The app has no safe way to produce server errors, and there is no latency metric for a `HighLatency` alert.
+- **No incident history or notifications.** Incidents exist only in the Bridge's logs and responses. There's no email, chat or paging.
+- **Short alert timings for the demo.** The 15-second waits are chosen so alerts fire before Kubernetes fixes a pod; production would use minutes.
+- **Monitoring history is lost with the cluster.** Prometheus and Grafana data are not persisted. All configuration comes from Git.
+- **The `argocd-metrics` target is `DOWN` until Argo CD is installed.**
+- **The Bridge webhook has no authentication.** It is only reachable inside the cluster (ClusterIP).
+- **Context, not diagnosis.** The Bridge adds information to alerts; it doesn't find root causes or fix anything.
+- **Argo CD's default permissions are broad.** The upstream install gives its controller cluster-wide access. The AppProject limits what this project's Application can deploy, not what Argo CD itself can do.
+- **Version caveat.** Kubernetes 1.37 is newer than the versions Argo CD 3.5 is tested on (1.33–1.36). It worked for everything shown here.
 
 ## Repository structure
 
