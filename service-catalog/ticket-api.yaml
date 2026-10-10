@@ -67,3 +67,20 @@ alerts:
       - Read the previous container's logs if the pod restarted
       - Confirm the other replica is Ready and serving traffic
       - Check rollout history for a deployment in progress
+
+  TicketServiceRolloutStuck:
+    summary: A ticket-api rollout exceeded its progress deadline (new pods are not becoming Ready).
+    severity:
+      production: warning   # previous pods keep serving (maxUnavailable 0): a failed release, not an outage
+      staging: info
+    # Platform signal first: is the new version unable to start (image, config,
+    # scheduling)? Hand over to Development if the new pods crash on start.
+    first_responder: cloudops
+    runbook: ticket-service-rollout-stuck.md
+    suggested_checks:
+      - Check rollout status and the Deployment's Progressing condition and reason
+      - Inspect the new ReplicaSet's pods and their waiting reason (e.g. ErrImageNeverPull, CrashLoopBackOff)
+      - Review Kubernetes events for the Deployment, ReplicaSets and pods
+      - Confirm the previous version's pods are still Ready and serving
+      - Compare Argo CD sync status with health status (Synced does not mean Healthy)
+      - Check whether the last Git change modified the image; if it caused the failure, recover with git revert

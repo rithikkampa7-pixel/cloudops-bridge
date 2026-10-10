@@ -92,3 +92,17 @@ data:
         honor_labels: true
         static_configs:
           - targets: ["kube-state-metrics.monitoring.svc:8080"]
+
+      # Argo CD application state (sync and health status of ticket-service)
+      # from the application controller's metrics Service. Plain HTTP inside the
+      # cluster; Argo CD's own NetworkPolicy allows port 8082 from any namespace,
+      # and no RBAC is needed (static target, no Kubernetes discovery).
+      # Only argocd_app_info is KEPT: the endpoint also exposes controller
+      # internals that nothing here uses.
+      - job_name: argocd-metrics
+        static_configs:
+          - targets: ["argocd-metrics.argocd.svc:8082"]
+        metric_relabel_configs:
+          - source_labels: [__name__]
+            regex: argocd_app_info
+            action: keep

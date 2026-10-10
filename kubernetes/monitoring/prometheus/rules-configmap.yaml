@@ -72,3 +72,31 @@ data:
               description: >-
                 {{ $value | humanizePercentage }} of application requests returned 5xx
                 over the last 2 minutes (threshold 5%, sustained 1m).
+
+          # A ticket-service rollout has stopped making progress: the Deployment
+          # reports Progressing=False with reason ProgressDeadlineExceeded
+          # (kube-state-metrics). Kubernetes sets this only after
+          # progressDeadlineSeconds (120s in deployment.yaml) without progress,
+          # so a normal rolling update, which reports ReplicaSetUpdated or
+          # NewReplicaSetAvailable, never matches.
+          # for: 1m confirms it across 4 evaluations, so it fires about 3 minutes
+          # after the stuck rollout began. warning, not critical: with
+          # maxUnavailable 0 the previous pods keep serving, so this is a failed
+          # release, not an outage (verified in the Phase 8 bad-release test).
+          - alert: TicketServiceRolloutStuck
+            expr: |
+              kube_deployment_status_condition{namespace="cloudops-bridge",deployment="ticket-service",condition="Progressing",status="false",reason="ProgressDeadlineExceeded"} == 1
+            for: 1m
+            labels:
+              severity: warning
+              service: ticket-api
+              environment: production
+            annotations:
+              summary: "ticket-service rollout is stuck (ProgressDeadlineExceeded)"
+              description: >-
+                Deployment {{ $labels.namespace }}/{{ $labels.deployment }} has made no
+                rollout progress for longer than its progress deadline: new pods are not
+                becoming Ready. With maxUnavailable 0 the previous pods normally keep
+                serving. Check the new ReplicaSet's pods and events, and compare Argo CD
+                sync and health status.
+              runbook: ticket-service-rollout-stuck.md

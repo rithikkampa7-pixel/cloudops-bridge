@@ -102,3 +102,59 @@ tests:
       - eval_time: 5m
         alertname: HighErrorRate
         exp_alerts: []
+
+  # TicketServiceRolloutStuck: healthy and normal-rollout conditions never alert;
+  # ProgressDeadlineExceeded is pending first, fires after `for: 1m`, and
+  # resolves when the condition clears. The series mirror kube-state-metrics:
+  # a new reason label is a new series and the previous one goes stale.
+  #   0-45s healthy, 1m-2m45s rolling out, 3m-5m45s deadline exceeded, 6m+ recovered
+  - interval: 15s
+    input_series:
+      - series: 'kube_deployment_status_condition{job="kube-state-metrics",instance="kube-state-metrics.monitoring.svc:8080",namespace="cloudops-bridge",deployment="ticket-service",condition="Progressing",status="true",reason="NewReplicaSetAvailable"}'
+        values: '1 1 1 1 stale _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 1 1 1 1 1 1 1 1'
+      - series: 'kube_deployment_status_condition{job="kube-state-metrics",instance="kube-state-metrics.monitoring.svc:8080",namespace="cloudops-bridge",deployment="ticket-service",condition="Progressing",status="true",reason="ReplicaSetUpdated"}'
+        values: '_ _ _ _ 1 1 1 1 1 1 1 1 stale _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _'
+      - series: 'kube_deployment_status_condition{job="kube-state-metrics",instance="kube-state-metrics.monitoring.svc:8080",namespace="cloudops-bridge",deployment="ticket-service",condition="Progressing",status="false",reason="ProgressDeadlineExceeded"}'
+        values: '_ _ _ _ _ _ _ _ _ _ _ _ 1 1 1 1 1 1 1 1 1 1 1 1 stale _ _ _ _ _ _ _'
+    alert_rule_test:
+      - eval_time: 45s
+        alertname: TicketServiceRolloutStuck
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: TicketServiceRolloutStuck
+        exp_alerts: []
+      - eval_time: 3m30s
+        alertname: TicketServiceRolloutStuck
+        exp_alerts: []
+      - eval_time: 4m15s
+        alertname: TicketServiceRolloutStuck
+        exp_alerts:
+          - exp_labels:
+              alertname: TicketServiceRolloutStuck
+              severity: warning
+              service: ticket-api
+              environment: production
+              job: kube-state-metrics
+              instance: kube-state-metrics.monitoring.svc:8080
+              namespace: cloudops-bridge
+              deployment: ticket-service
+              condition: Progressing
+              status: "false"
+              reason: ProgressDeadlineExceeded
+            exp_annotations:
+              summary: "ticket-service rollout is stuck (ProgressDeadlineExceeded)"
+              description: "Deployment cloudops-bridge/ticket-service has made no rollout progress for longer than its progress deadline: new pods are not becoming Ready. With maxUnavailable 0 the previous pods normally keep serving. Check the new ReplicaSet's pods and events, and compare Argo CD sync and health status."
+              runbook: ticket-service-rollout-stuck.md
+      - eval_time: 6m30s
+        alertname: TicketServiceRolloutStuck
+        exp_alerts: []
+    promql_expr_test:
+      # Pending (condition true, `for` not yet elapsed) before firing.
+      - expr: ALERTS{alertname="TicketServiceRolloutStuck"}
+        eval_time: 3m30s
+        exp_samples:
+          - labels: 'ALERTS{alertname="TicketServiceRolloutStuck",alertstate="pending",severity="warning",service="ticket-api",environment="production",job="kube-state-metrics",instance="kube-state-metrics.monitoring.svc:8080",namespace="cloudops-bridge",deployment="ticket-service",condition="Progressing",status="false",reason="ProgressDeadlineExceeded"}'
+            value: 1
+      - expr: ALERTS{alertname="TicketServiceRolloutStuck"}
+        eval_time: 2m
+        exp_samples: []

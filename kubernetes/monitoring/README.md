@@ -30,7 +30,7 @@ Prometheus discovers and scrapes every ticket-service pod and evaluates alert ru
 
 | Implemented | Still future |
 |---|---|
-| Prometheus, Kubernetes service discovery and scraping, PromQL, Grafana, provisioned Prometheus data source, provisioned CloudOps dashboard. Alert rules `HighErrorRate` and `TicketServiceTargetDown`, Alertmanager with grouping and alert lifecycle, promtool/amtool validation. Alertmanager → CloudOps Bridge webhook with catalog enrichment of firing and resolved alerts. kubelet CPU metrics, kube-state-metrics, and the Grafana Scaling row for the HPA | Any notification channel (email, Slack, paging), incident persistence/history, webhook authentication, a `HighLatency` alert (no latency metric exists), PostgreSQL, Argo CD, GitHub Actions, Terraform, Ansible |
+| Prometheus, Kubernetes service discovery and scraping, PromQL, Grafana, provisioned Prometheus data source, provisioned CloudOps dashboard. Alert rules `HighErrorRate` and `TicketServiceTargetDown`, Alertmanager with grouping and alert lifecycle, promtool/amtool validation. Alertmanager → CloudOps Bridge webhook with catalog enrichment of firing and resolved alerts. kubelet CPU metrics, kube-state-metrics, and the Grafana Scaling row for the HPA. Rollout alert `TicketServiceRolloutStuck`, Argo CD application metrics and the Grafana GitOps row (section 12) | Any notification channel (email, Slack, paging), incident persistence/history, webhook authentication, a `HighLatency` alert (no latency metric exists), PostgreSQL, Terraform, Ansible |
 
 ## Files
 
@@ -38,7 +38,7 @@ Prometheus discovers and scrapes every ticket-service pod and evaluates alert ru
 kubernetes/monitoring/
 ├── namespace.yaml                         namespace monitoring
 ├── prometheus/rbac.yaml                   ServiceAccount + namespaced Role (read pods in cloudops-bridge only)
-├── prometheus/configmap.yaml              prometheus.yml: scrape jobs (incl. kubelet + kube-state-metrics), rule files, Alertmanager target
+├── prometheus/configmap.yaml              prometheus.yml: scrape jobs (incl. kubelet, kube-state-metrics, Argo CD), rule files, Alertmanager target
 ├── prometheus/rules-configmap.yaml        alert rules, the single source of truth
 ├── alertmanager/configmap.yaml            alertmanager.yml: grouping; ticket-api → Bridge webhook
 ├── alertmanager/deployment.yaml, service.yaml
@@ -384,7 +384,15 @@ kubectl -n monitoring rollout restart deployment/grafana
 
 If Argo CD manages ticket-service, don't use the `apply -R` line above. Apply only `kubernetes/monitoring/grafana/` instead ([why](../../gitops/README.md#ownership-before-and-after-adoption)).
 
-Changing `prometheus.yml` needs `kubectl -n monitoring rollout restart deployment/prometheus`, which also clears its history.
+Changing `prometheus.yml` or the alert rules needs Prometheus to reload them. A `kubectl -n monitoring rollout restart deployment/prometheus` works but clears its history. To keep history, apply the ConfigMap, wait until the mounted file shows the change (about a minute), then send Prometheus the reload signal it supports (SIGHUP; it runs as PID 1). No admin endpoint is needed:
+
+```bash
+kubectl apply -f kubernetes/monitoring/prometheus/configmap.yaml -f kubernetes/monitoring/prometheus/rules-configmap.yaml
+kubectl -n monitoring exec deploy/prometheus -- grep -c argocd-metrics /etc/prometheus/prometheus.yml
+kubectl -n monitoring exec deploy/prometheus -- kill -HUP 1
+```
+
+The `grep` is only an example check for one change; adapt it to what you changed. Grafana reloads provisioned dashboard files on its own (every 10 s by default) once the mounted ConfigMap has updated.
 
 ## 10. Alerting
 
@@ -396,7 +404,7 @@ Changing `prometheus.yml` needs `kubectl -n monitoring rollout restart deploymen
 - **Prometheus vs Alertmanager.** Prometheus *decides* whether something is wrong: it evaluates rules every 15 s (`evaluation_interval`). Alertmanager *handles what happens next*: it deduplicates, groups, silences, and routes alerts to receivers, and it tracks each alert until Prometheus says it's resolved. Grafana only visualizes.
 - **Lifecycle.** **inactive** (condition false) → **pending** (condition true, but not yet for the whole `for` duration) → **firing** (true for at least `for`; sent to Alertmanager) → **resolved** (condition false again; Prometheus tells Alertmanager, which drops it from the active list). If the condition clears while pending, the alert goes straight back to inactive and never fires.
 
-### The two rules
+### The rules
 
 Defined in `prometheus/rules-configmap.yaml`, loaded from `/etc/prometheus-rules/*.yml`, and evaluated every 15 s.
 
@@ -404,6 +412,7 @@ Defined in `prometheus/rules-configmap.yaml`, loaded from `/etc/prometheus-rules
 |---|---|---|---|---|
 | `TicketServiceTargetDown` | `up{job="ticket-service"} == 0` | 15s | warning | Prometheus can't scrape a ticket-service pod: it's hung, restarting, or unreachable. One alert per pod (keeps `pod` and `instance`). Prometheus's own target is excluded |
 | `HighErrorRate` | 5xx ÷ all app requests over 2m `> 0.05` **and** app traffic `> 0.1` req/s | 1m | critical | The service itself is failing requests |
+| `TicketServiceRolloutStuck` | `kube_deployment_status_condition{deployment="ticket-service",condition="Progressing",status="false",reason="ProgressDeadlineExceeded"} == 1` | 1m | warning | A rollout made no progress for longer than `progressDeadlineSeconds` (120 s): new pods aren't becoming Ready. The old pods keep serving (`maxUnavailable: 0`), so it's a failed release, not an outage. Runbook: [ticket-service-rollout-stuck.md](../../runbooks/ticket-service-rollout-stuck.md) |
 
 **HighErrorRate in detail.**
 - **Numerator:** rate of **5xx** responses.
@@ -414,6 +423,8 @@ Defined in `prometheus/rules-configmap.yaml`, loaded from `/etc/prometheus-rules
   - **No traffic:** 0/0 is NaN, the comparison is false, so no alert.
   - **Near-zero traffic:** the `> 0.1 req/s` guard stops one failed request at idle from reading as a 100% outage.
 - **Window and `for`:** a 2-minute rate window smooths single bad scrapes, and `for: 1m` requires the condition to hold for a minute. Because of the 2-minute window, the alert clears up to about 2 minutes *after* errors stop.
+
+**TicketServiceRolloutStuck in detail.** Kubernetes sets `ProgressDeadlineExceeded` only after a rollout has made no progress for `progressDeadlineSeconds`, so a normal rolling update (reason `ReplicaSetUpdated`, then `NewReplicaSetAvailable`) never matches; `for: 1m` only confirms the condition, so the alert fires about 3 minutes after a rollout gets stuck. It was added after the Phase 8 bad-release test, where a missing image left a rollout stuck with no alert: the never-started pod is never scraped, so `TicketServiceTargetDown` can't see it. The rule logic is covered by promtool unit tests. It hasn't been fired on the live cluster.
 
 **These are demo values, not production values.**
 - **HighErrorRate:** production thresholds come from the service's SLO, typically multi-window *error-budget burn-rate* alerts tuned against real baseline error rates.
@@ -496,7 +507,7 @@ kubectl -n monitoring exec deploy/alertmanager -- amtool config routes show --al
 ```
 
 Expected baseline:
-- `--rules` lists both rules with `state=inactive health=ok`, their expressions and their labels.
+- `--rules` lists the three rules with `state=inactive health=ok`, their expressions and their labels.
 - `alertmanagers` shows one active URL, `http://alertmanager.monitoring.svc:9093/api/v2/alerts`.
 - Alertmanager returns `[]`, and `amtool` prints only its header row.
 
@@ -754,6 +765,22 @@ python3 kubernetes/tools/promql.py --targets
 python3 kubernetes/tools/promql.py 'count by (__name__, container) ({job="kubelet-resource"})'
 python3 kubernetes/tools/promql.py 'kube_horizontalpodautoscaler_status_desired_replicas'
 kubectl top pods -n cloudops-bridge
+```
+
+### GitOps / Deployment Health row
+
+Once Argo CD is installed ([gitops/README.md](../../gitops/README.md)), the `argocd-metrics` job scrapes the application controller's metrics Service (`argocd-metrics.argocd.svc:8082`) and keeps only `argocd_app_info`. That metric has one series per Application, with `sync_status` and `health_status` as labels (value always 1). Without Argo CD the target is simply `DOWN`.
+
+The dashboard's **GitOps / Deployment Health** row shows:
+- Argo CD sync status and health status for ticket-service, as text from those labels (no derived score).
+- The Deployment's Progressing condition (`status: reason`) from kube-state-metrics.
+- A history of the three, starting when Prometheus began scraping Argo CD.
+
+Desired vs available replicas are already in the Scaling row.
+
+```bash
+python3 kubernetes/tools/promql.py 'argocd_app_info{name="ticket-service"}'
+python3 kubernetes/tools/promql.py 'kube_deployment_status_condition{deployment="ticket-service",condition="Progressing"} == 1'
 ```
 
 ### Access and its limits (security)

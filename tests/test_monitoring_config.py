@@ -38,9 +38,12 @@ def test_dashboard_identity_and_datasource():
     for panel in (p for p in DASHBOARD["panels"] if p["type"] != "row"):
         assert panel["datasource"]["uid"] == uid, panel["title"]
         for target in panel["targets"]:
-            # App metrics are scoped by job; Kubernetes metrics by namespace.
-            assert ('job="ticket-service"' in target["expr"]
-                    or 'namespace="cloudops-bridge"' in target["expr"]), (panel["title"], target["expr"])
+            # App metrics are scoped by job; Kubernetes metrics by namespace;
+            # Argo CD metrics by their job and the Application name.
+            expr = target["expr"]
+            assert ('job="ticket-service"' in expr
+                    or re.search(r'(?<![a-z_])namespace="cloudops-bridge"', expr)
+                    or ('job="argocd-metrics"' in expr and 'name="ticket-service"' in expr)), (panel["title"], expr)
 
 
 def test_dashboard_counters_use_rate_or_increase():
@@ -137,7 +140,26 @@ def test_dashboard_queries_only_metrics_prometheus_collects():
     app = {"up", "http_requests_total", "tickets_available", "tickets_sold_total"}
     keep = jobs["kubelet-resource"]["metric_relabel_configs"][0]["regex"].split(";")[0]
     kubelet = set(keep.strip("()").split("|"))
+    argocd = set(jobs["argocd-metrics"]["metric_relabel_configs"][0]["regex"].split("|"))
     assert "kube-state-metrics" in jobs
     used = {m for e in EXPRS for m in re.findall(r"([a-zA-Z_:][a-zA-Z0-9_:]*)\{", e)}
     for metric in used:
-        assert metric in app | kubelet or metric.startswith("kube_"), metric
+        assert metric in app | kubelet | argocd or metric.startswith("kube_"), metric
+
+
+def test_argocd_scrape_is_a_static_in_cluster_target_keeping_only_app_info():
+    config = embedded_yaml("monitoring/prometheus/configmap.yaml", "prometheus.yml")
+    job = next(j for j in config["scrape_configs"] if j["job_name"] == "argocd-metrics")
+    # Static Service DNS target: no Kubernetes discovery, so no extra RBAC.
+    assert job["static_configs"] == [{"targets": ["argocd-metrics.argocd.svc:8082"]}]
+    assert "kubernetes_sd_configs" not in job and "authorization" not in job
+    assert job["metric_relabel_configs"] == [
+        {"source_labels": ["__name__"], "regex": "argocd_app_info", "action": "keep"}
+    ]
+
+
+def test_dashboard_uses_argocd_app_info_not_removed_legacy_metrics():
+    assert any("argocd_app_info" in e for e in EXPRS)
+    assert not any(re.search(r"argocd_app_(sync|health)_status", e) for e in EXPRS)
+    titles = {p["title"] for p in DASHBOARD["panels"]}
+    assert "GitOps / Deployment Health" in titles

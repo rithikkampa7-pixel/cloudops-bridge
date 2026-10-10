@@ -61,9 +61,9 @@ def test_prometheus_sends_alerts_to_the_alertmanager_service():
     assert targets == [f"{meta['name']}.{meta['namespace']}.svc:{port}"]
 
 
-def test_exactly_the_two_supported_alerts():
+def test_exactly_the_supported_alerts():
     # HighLatency is deliberately absent: the app exports no latency metric.
-    assert set(RULES) == {"HighErrorRate", "TicketServiceTargetDown"}
+    assert set(RULES) == {"HighErrorRate", "TicketServiceTargetDown", "TicketServiceRolloutStuck"}
 
 
 def test_high_error_rate_counts_only_server_errors():
@@ -77,6 +77,26 @@ def test_high_error_rate_counts_only_server_errors():
 
 def test_target_down_is_scoped_to_ticket_service():
     assert RULES["TicketServiceTargetDown"]["expr"].strip() == 'up{job="ticket-service"} == 0'
+
+
+def test_rollout_stuck_matches_only_an_exceeded_progress_deadline():
+    rule = RULES["TicketServiceRolloutStuck"]
+    expr = rule["expr"].strip()
+    assert expr.startswith("kube_deployment_status_condition{") and expr.endswith("== 1")
+    for matcher in ('namespace="cloudops-bridge"', 'deployment="ticket-service"',
+                    'condition="Progressing"', 'status="false"', 'reason="ProgressDeadlineExceeded"'):
+        assert matcher in expr, matcher
+    # The condition itself already means 120s without progress; `for` only confirms it.
+    assert rule["for"] == "1m"
+
+
+def test_runbook_annotations_match_the_service_catalog():
+    for name, rule in RULES.items():
+        runbook = rule["annotations"].get("runbook")
+        if runbook:
+            assert runbook == CATALOG["alerts"][name]["runbook"], name
+            assert (ROOT / "runbooks" / runbook).is_file(), runbook
+    assert RULES["TicketServiceRolloutStuck"]["annotations"]["runbook"]
 
 
 def test_alert_labels_match_the_service_catalog():
